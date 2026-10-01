@@ -900,7 +900,9 @@ static int32_t mtmd_helper_eval_chunks_pi0_pi05(mtmd_context * ctx,
         if (ret_batched == 0) {
             auto first_chunk = mtmd_input_chunks_get(chunks, batched_image_indices[0]);
             n_tokens_per_image_cached = mtmd_input_chunk_get_n_tokens(first_chunk);
-            LOG_INF("batched ViT encoded %zu images in %.2f ms\n", batched_image_indices.size(), batched_vit_ms);
+            if (pi_model_env_truthy(std::getenv("LLAMA_PI0_PERF"))) {
+                LOG_INF("batched ViT encoded %zu images in %.2f ms\n", batched_image_indices.size(), batched_vit_ms);
+            }
             {
                 std::ostringstream oss;
                 oss << "name=pi_model_mtmd_batched_vit"
@@ -1061,7 +1063,9 @@ static int32_t mtmd_helper_eval_chunks_pi0_pi05(mtmd_context * ctx,
                 batched_image_idx++;
                 vit_ms = (batched_image_idx == 1) ? batched_vit_ms : 0.0;
                 total_vit_ms += vit_ms;
-                LOG_INF("using batched ViT result for image %d\n", batched_image_idx);
+                if (pi_model_env_truthy(std::getenv("LLAMA_PI0_PERF"))) {
+                    LOG_INF("using batched ViT result for image %d\n", batched_image_idx);
+                }
             } else {
                 // Sequential fallback
                 LOG_INF("encoding %s slice...\n", name);
@@ -1193,7 +1197,9 @@ static int32_t mtmd_helper_eval_chunks_pi0_pi05(mtmd_context * ctx,
                 }
                 
                 
-                LOG_INF("decoding %s batch %d/%d, n_tokens_batch = %d\n", name, i_batch+1, n_img_batches, n_tokens_batch);
+                if (pi_model_env_truthy(std::getenv("LLAMA_PI0_PERF"))) {
+                    LOG_INF("decoding %s batch %d/%d, n_tokens_batch = %d\n", name, i_batch+1, n_img_batches, n_tokens_batch);
+                }
 
                 int64_t t1 = ggml_time_ms();
 
@@ -1204,7 +1210,9 @@ static int32_t mtmd_helper_eval_chunks_pi0_pi05(mtmd_context * ctx,
         
                 
         
-                LOG_INF("%s decoded (batch %d/%d) in %" PRId64 " ms\n", name, i_batch+1, n_img_batches, ggml_time_ms() - t1);
+                if (pi_model_env_truthy(std::getenv("LLAMA_PI0_PERF"))) {
+                    LOG_INF("%s decoded (batch %d/%d) in %" PRId64 " ms\n", name, i_batch+1, n_img_batches, ggml_time_ms() - t1);
+                }
         
                 i_batch++;
             }

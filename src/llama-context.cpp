@@ -96,7 +96,9 @@ static bool try_load_pi0_action_noise(std::vector<float> & noise) {
         return false;
     }
 
-    LLAMA_LOG_INFO("%s: loaded PI0 action noise from %s\n", __func__, path);
+    if (const char * perf = std::getenv("LLAMA_PI0_PERF"); perf != nullptr && perf[0] != '\0' && std::atoi(perf) != 0) {
+        LLAMA_LOG_INFO("%s: loaded PI0 action noise from %s\n", __func__, path);
+    }
     return true;
 }
 

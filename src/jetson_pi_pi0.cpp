@@ -15,8 +15,11 @@
 #include "pi-model-detect.h"
 #include "jetson_pi_pi0_prompt.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -61,6 +64,17 @@ struct Pi0Engine {
 // Open errors are reported through a process sink because the contract is
 // *out == NULL on failure (no handle to query last_error from).
 static thread_local std::string g_open_error;
+
+// The standalone llama/mtmd callbacks print DEBUG messages unconditionally.
+// That is useful for CLI development, but it adds synchronous stderr I/O to
+// every graph replay in an embedded policy loop. Keep diagnostics available
+// behind LLAMA_PI0_PERF while making the normal in-process API quiet at DEBUG.
+void embedded_log_callback(enum ggml_log_level level, const char * text, void *) {
+    if (level == GGML_LOG_LEVEL_DEBUG && std::getenv("LLAMA_PI0_PERF") == nullptr) {
+        return;
+    }
+    std::fputs(text, stderr);
+}
 
 int32_t reject(Pi0Engine * e, int32_t status, const char * msg) {
     if (e) e->set_error(msg);
@@ -134,8 +148,16 @@ int32_t jetson_pi_pi0_open(const jetson_pi_pi0_config * config,
     }
     e->model_kind = detected.kind;
     int32_t hw = static_cast<int32_t>(std::thread::hardware_concurrency());
-    e->n_threads_eff = (e->n_threads_cfg > 0) ? e->n_threads_cfg
-                                              : (hw > 0 ? hw : 1);
+    const int32_t detected_threads = hw > 0 ? hw : 1;
+    // A fully offloaded policy only needs a small host worker pool.  Using
+    // every visible CPU by default is especially harmful on multi-socket or
+    // multi-NUMA 4090 hosts: the PI0.5 hot path can spend more time waking and
+    // synchronizing workers than running kernels.  Explicit n_threads keeps
+    // its existing override semantics; CPU inference still uses all workers.
+    const int32_t default_threads = e->backend == "cpu"
+        ? detected_threads
+        : std::min<int32_t>(detected_threads, 8);
+    e->n_threads_eff = e->n_threads_cfg > 0 ? e->n_threads_cfg : default_threads;
 
     // Open errors are reported through the process sink because the contract
     // is *out == NULL on failure (no handle to query last_error from).
@@ -151,6 +173,8 @@ int32_t jetson_pi_pi0_open(const jetson_pi_pi0_config * config,
 
     // Backends must be registered before llama_model_load_from_file. The
     // common_params parser does this for the CLI; we are not on that path.
+    llama_log_set(embedded_log_callback, nullptr);
+    mtmd_helper_log_set(embedded_log_callback, nullptr);
     ggml_backend_load_all();
 
     ggml_backend_dev_t selected_device = nullptr;
@@ -191,7 +215,9 @@ int32_t jetson_pi_pi0_open(const jetson_pi_pi0_config * config,
     cparams.n_ctx       = 4096;   // >> combined token count; keeps n_batch clamp off
     cparams.n_batch     = 2048;
     cparams.n_ubatch    = 1024;
-    cparams.n_seq_max   = 4;
+    // The public engine owns one persistent policy session. Reserving four
+    // independent sequences only inflates its KV/context state.
+    cparams.n_seq_max   = 1;
     cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     cparams.n_threads    = e->n_threads_eff;
     cparams.n_threads_batch = e->n_threads_eff;

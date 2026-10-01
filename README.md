@@ -34,7 +34,7 @@
 
 ## News
 
-- **[2026/09] 🎉🎉🎉 Jetson-PI has been accepted at CoRL 2026!**
+- **[2026/09] 🎉🎉🎉 Jetson-PI has been accepted as a Spotlight at CoRL 2026!**
 - **[2026/08] Pre-converted GGUF checkpoints are available.** Ready-to-use PI0, PI0.5, and GR00T N1.7 main-model and vision-projector GGUF files are released on [Hugging Face](https://huggingface.co/diantoudefengshan/Jetson-PI-GGUF).
 - **[2026/08] NVIDIA Isaac GR00T N1.7 inference is available.** Convert the official checkpoint to GGUF and run the complete Qwen3-VL backbone, Action Head, and four-step action flow through either `libjetson_pi_gr00t` or the foreground HTTP server.
 - **[2026/07] Python APIs are available.** Use the managed foreground NumPy client for persistent `llama-server` sessions or the optional pybind11 module for in-process PI0/PI0.5 action inference.
@@ -161,6 +161,25 @@ PI_MODEL=auto \
 ```
 
 Use `PI_MODEL=pi0` or `PI_MODEL=pi05` to force a model path.
+
+**RTX 4090 (single GPU):**
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+PI_MODEL=auto \
+./build/bin/llama-server \
+  -m /path/to/pi_llm.gguf \
+  --mmproj /path/to/mmproj.gguf \
+  -ngl 37 \
+  --chat-template vicuna \
+  --host 127.0.0.1 \
+  --port 8080 \
+  -np 1 \
+  -t 8 \
+  -tb 8
+```
+
+The `-t 8 -tb 8` settings configure the host thread pools used by the persistent foreground server and are recommended for the tested RTX 4090 setup.
 
 ### 4. Run one inference round
 

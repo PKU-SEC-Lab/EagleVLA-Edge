@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="760" height="210" viewBox="0 0 760 210" role="img" aria-labelledby="title desc">
-  <title id="title">Jetson-PI Edge</title>
-  <desc id="desc">Jetson-PI Edge logo combining a robotic vision chip, a pi symbol, and a forward motion trail.</desc>
+  <title id="title">EagleVLA-Edge</title>
+  <desc id="desc">EagleVLA-Edge logo combining a robotic vision chip, a pi symbol, and a forward motion trail.</desc>
   <defs>
     <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#071827"/>
@@ -38,8 +38,8 @@
   <path d="M145 48l-17 31h14l-12 28 31-39h-16l12-20z" fill="url(#spark)" filter="url(#glow)"/>
 
   <g font-family="Inter,Segoe UI,Arial,sans-serif">
-    <text x="213" y="101" fill="#f5fbff" font-size="58" font-weight="750" letter-spacing="-2">Jetson-PI</text>
-    <text x="495" y="101" fill="#44d7c4" font-size="58" font-weight="350">Edge</text>
+    <text x="213" y="101" fill="#f5fbff" font-size="58" font-weight="750" letter-spacing="-2">EagleVLA</text>
+    <text x="485" y="101" fill="#44d7c4" font-size="58" font-weight="350">Edge</text>
     <text x="216" y="137" fill="#a8c4d3" font-size="18" letter-spacing="3">REAL-TIME VLA INFERENCE ONBOARD</text>
   </g>
 

@@ -5,7 +5,7 @@
     <a href="https://www.tlaic.ac.cn/"><img src="media/tlaic-wordmark.svg" alt="Beijing Tongminghu Information Technology Application Innovation Center" width="190" /></a>
   </p>
 
-  <img src="media/jetson-pi-edge-logo.svg" alt="Jetson-PI Edge" width="720" />
+  <img src="media/eaglevla-edge-logo.svg" alt="EagleVLA-Edge" width="720" />
 
   <p><strong>A llama.cpp-based inference engine for real-time onboard Vision-Language-Action control.</strong></p>
   <p>Run VLA locally on NVIDIA Jetson, desktop GPUs, CPUs, NPUs, and other edge platforms through a persistent robot-facing HTTP runtime.</p>
@@ -13,7 +13,7 @@
   <p>
     <a href="https://arxiv.org/abs/2607.12659"><img src="https://img.shields.io/badge/arXiv-2607.12659-b31b1b.svg" alt="arXiv" /></a>
     <a href="https://www.corl.org/"><img src="https://img.shields.io/badge/CoRL-2026_Accepted-6f42c1.svg" alt="Accepted at CoRL 2026" /></a>
-    <a href="https://github.com/PKU-SEC-Lab/Jetson-PI"><img src="https://img.shields.io/badge/Jetson--PI-Algorithm-35b8a9.svg" alt="Jetson-PI algorithm" /></a>
+    <a href="https://github.com/PKU-SEC-Lab/EagleVLA"><img src="https://img.shields.io/badge/EagleVLA-Algorithm-35b8a9.svg" alt="EagleVLA algorithm" /></a>
     <a href="https://huggingface.co/diantoudefengshan/Jetson-PI-GGUF"><img src="https://img.shields.io/badge/Model-GGUF-f5c542.svg" alt="GGUF checkpoints" /></a>
     <a href="https://github.com/ggml-org/llama.cpp"><img src="https://img.shields.io/badge/Based_on-llama.cpp-3578c8.svg" alt="Based on llama.cpp" /></a>
     <a href="https://github.com/flashrt-project/FlashRT"><img src="https://img.shields.io/badge/Support-FlashRT-f28c45.svg" alt="Support FlashRT" /></a>
@@ -34,30 +34,30 @@
 
 ## News
 
-- **[2026/09] 🎉🎉🎉 Jetson-PI has been accepted as a Spotlight at CoRL 2026!**
+- **[2026/09] 🎉🎉🎉 EagleVLA has been accepted as a Spotlight at CoRL 2026!**
 - **[2026/08] Pre-converted GGUF checkpoints are available.** Ready-to-use PI0, PI0.5, and GR00T N1.7 main-model and vision-projector GGUF files are released on [Hugging Face](https://huggingface.co/diantoudefengshan/Jetson-PI-GGUF).
 - **[2026/08] NVIDIA Isaac GR00T N1.7 inference is available.** Convert the official checkpoint to GGUF and run the complete Qwen3-VL backbone, Action Head, and four-step action flow through either `libjetson_pi_gr00t` or the foreground HTTP server.
 - **[2026/07] Python APIs are available.** Use the managed foreground NumPy client for persistent `llama-server` sessions or the optional pybind11 module for in-process PI0/PI0.5 action inference.
-- **[2026/07] Updated to the latest llama.cpp codebase.** Jetson-PI-Edge now tracks the latest llama.cpp architecture while retaining PI0/PI0.5 inference, foreground server, and FlashRT integration support.
-- **[2026/07] FlashRT support is available.** Jetson-PI is exposed as a FlashRT-loadable provider through a C API, allowing [FlashRT](https://github.com/flashrt-project/FlashRT) to invoke the same PI0/PI0.5 model path directly from Python without starting the foreground HTTP server.
-- **[2026/07] Jetson-PI is open source.** We released the [Jetson-PI asynchronous control framework](https://github.com/PKU-SEC-Lab/Jetson-PI) and this [Jetson-PI-Edge inference engine](https://github.com/PKU-SEC-Lab/Jetson-PI-Edge).
+- **[2026/07] Updated to the latest llama.cpp codebase.** EagleVLA-Edge now tracks the latest llama.cpp architecture while retaining PI0/PI0.5 inference, foreground server, and FlashRT integration support.
+- **[2026/07] FlashRT support is available.** EagleVLA is exposed as a FlashRT-loadable provider through a C API, allowing [FlashRT](https://github.com/flashrt-project/FlashRT) to invoke the same PI0/PI0.5 model path directly from Python without starting the foreground HTTP server.
+- **[2026/07] EagleVLA is open source.** We released the [EagleVLA asynchronous control framework](https://github.com/PKU-SEC-Lab/EagleVLA) and this [EagleVLA-Edge inference engine](https://github.com/PKU-SEC-Lab/EagleVLA-Edge).
 
 ## About
 
-Jetson-PI-Edge is the inference engine accompanying our paper:
+EagleVLA-Edge is the inference engine accompanying our paper:
 
-> **[Jetson-PI: Towards Onboard Real-Time Robot Control via Foresight-Aligned Asynchronous Inference](https://arxiv.org/abs/2607.12659)**<br>
+> **[EagleVLA: Towards Onboard Real-Time Robot Control via Foresight-Aligned Asynchronous Inference](https://arxiv.org/abs/2607.12659)**<br>
 > Zebin Yang, Qi Wang, Yunhe Wang, Xiurui Guo, Bo Yu, Shaoshan Liu, Jiafeng Xu, Hao Dong, and Meng Li.<br>
 > Accepted at the Conference on Robot Learning (CoRL), 2026.
 
-Deploying VLA policies on low-power onboard hardware is difficult because model latency directly limits control frequency and responsiveness. Jetson-PI combines foresight-aligned asynchronous correction with confidence-aware scheduling and system-level acceleration. This repository provides the llama.cpp-based execution layer: GGUF model loading, multimodal encoding, PI and GR00T action inference, graph reuse, and robot-facing runtime interfaces.
+Deploying VLA policies on low-power onboard hardware is difficult because model latency directly limits control frequency and responsiveness. EagleVLA combines foresight-aligned asynchronous correction with confidence-aware scheduling and system-level acceleration. This repository provides the llama.cpp-based execution layer: GGUF model loading, multimodal encoding, PI and GR00T action inference, graph reuse, and robot-facing runtime interfaces.
 
-The project is built on [llama.cpp](https://github.com/ggml-org/llama.cpp). The asynchronous control algorithm lives in [PKU-SEC-Lab/Jetson-PI](https://github.com/PKU-SEC-Lab/Jetson-PI).
+The project is built on [llama.cpp](https://github.com/ggml-org/llama.cpp). The asynchronous control algorithm lives in [PKU-SEC-Lab/EagleVLA](https://github.com/PKU-SEC-Lab/EagleVLA).
 
 ## Real-World Demo
 
 <p align="center">
-  <img src="video/demo.gif" alt="Jetson-PI real-world comparison demo" width="720" />
+  <img src="video/demo.gif" alt="EagleVLA real-world comparison demo" width="720" />
 </p>
 
 <p align="center">
@@ -146,7 +146,7 @@ The runtime expects two matching files:
 - a PI language/action model in GGUF format;
 - a SigLIP vision encoder/projector in GGUF format.
 
-Convert a PI0 or PI0.5 checkpoint by following [Model Preparation](https://github.com/PKU-SEC-Lab/Jetson-PI-Edge/blob/master/docs/model_conversion.md), or download the ready-to-use GGUF checkpoints directly from [Hugging Face](https://huggingface.co/diantoudefengshan/Jetson-PI-GGUF).
+Convert a PI0 or PI0.5 checkpoint by following [Model Preparation](https://github.com/PKU-SEC-Lab/EagleVLA-Edge/blob/master/docs/model_conversion.md), or download the ready-to-use GGUF checkpoints directly from [Hugging Face](https://huggingface.co/diantoudefengshan/Jetson-PI-GGUF).
 
 ### 3. Start the foreground server
 
@@ -320,7 +320,7 @@ import numpy as np
 
 from jetson_pi_foreground import ManagedForegroundSession
 
-SERVER_PATH = "/path/to/Jetson-PI-Edge/build-graph/bin/llama-server"
+SERVER_PATH = "/path/to/EagleVLA-Edge/build-graph/bin/llama-server"
 MODEL_PATH = "/path/to/pi0-model.gguf"
 MMPROJ_PATH = "/path/to/mmproj-model.gguf"
 IMAGE_PATH = "/path/to/test-224.jpg"
@@ -358,15 +358,15 @@ Keep the same `session` alive for repeated control steps so that the model and C
 
 ## FlashRT Support
 
-Jetson-PI can be loaded by [FlashRT](https://github.com/flashrt-project/FlashRT) through a C API provider. The provider reuses the same llama.cpp-based PI0/PI0.5 implementation and GGUF model path from this repository, while FlashRT supplies the Python-facing model API. The foreground HTTP server is not required for this integration.
+EagleVLA can be loaded by [FlashRT](https://github.com/flashrt-project/FlashRT) through a C API provider. The provider reuses the same llama.cpp-based PI0/PI0.5 implementation and GGUF model path from this repository, while FlashRT supplies the Python-facing model API. The foreground HTTP server is not required for this integration.
 
-After installing FlashRT, configure its C++ build with this repository as the Jetson-PI source tree:
+After installing FlashRT, configure its C++ build with this repository as the EagleVLA source tree:
 
 ```bash
 cmake -S /path/to/FlashRT/cpp -B /path/to/FlashRT/cpp/build-jetson-pi \
   -DCMAKE_BUILD_TYPE=Release \
   -DFLASHRT_CPP_WITH_JETSON_PI=ON \
-  -DJETSON_PI_ROOT=/path/to/Jetson-PI-Edge \
+  -DJETSON_PI_ROOT=/path/to/EagleVLA-Edge \
   -DGGML_CUDA=ON \
   -DGGML_CUDA_FA=ON \
   -DCMAKE_CUDA_ARCHITECTURES=<target-sm>
@@ -461,11 +461,11 @@ Latency is measured in milliseconds on NVIDIA Jetson Orin in MAXN mode. See the 
 
 ## Citation
 
-If Jetson-PI or Jetson-PI-Edge helps your research, please cite our paper:
+If EagleVLA or EagleVLA-Edge helps your research, please cite our paper:
 
 ```bibtex
-@article{yang2026jetson,
-  title={Jetson-PI: Towards Onboard Real-Time Robot Control via Foresight-Aligned Asynchronous Inference},
+@article{yang2026eaglevla,
+  title={EagleVLA: Towards Onboard Real-Time Robot Control via Foresight-Aligned Asynchronous Inference},
   author={Yang, Zebin and Wang, Qi and Wang, Yunhe and Guo, Xiurui and Yu, Bo and Liu, Shaoshan and Xu, Jiafeng and Dong, Hao and Li, Meng},
   journal={arXiv preprint arXiv:2607.12659},
   year={2026}
@@ -474,4 +474,4 @@ If Jetson-PI or Jetson-PI-Edge helps your research, please cite our paper:
 
 ## Acknowledgments
 
-Jetson-PI-Edge builds on [llama.cpp](https://github.com/ggml-org/llama.cpp), [OpenPI](https://github.com/Physical-Intelligence/openpi), the PI model family from [Physical Intelligence](https://www.physicalintelligence.company/), and [NVIDIA Isaac GR00T](https://github.com/NVIDIA/Isaac-GR00T). We also thank the [FlashRT](https://github.com/flashrt-project/FlashRT) project for its high-performance real-time VLA deployment path.
+EagleVLA-Edge builds on [llama.cpp](https://github.com/ggml-org/llama.cpp), [OpenPI](https://github.com/Physical-Intelligence/openpi), the PI model family from [Physical Intelligence](https://www.physicalintelligence.company/), and [NVIDIA Isaac GR00T](https://github.com/NVIDIA/Isaac-GR00T). We also thank the [FlashRT](https://github.com/flashrt-project/FlashRT) project for its high-performance real-time VLA deployment path.

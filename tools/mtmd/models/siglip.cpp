@@ -82,9 +82,18 @@ ggml_tensor * clip_graph_siglip::build_vit_pi05_legacy(ggml_tensor * inp) {
             NORM_TYPE_NORMAL, eps, il);
         cb(cur, "layer_inp_normed", il);
 
-        ggml_tensor * Qcur = build_mm(layer.q_w, cur);
-        ggml_tensor * Kcur = build_mm(layer.k_w, cur);
-        ggml_tensor * Vcur = build_mm(layer.v_w, cur);
+        // Q/K/V share the same normalized activation. For a BF16 ViT,
+        // materialize that conversion once instead of inside all three GEMMs.
+        ggml_tensor * qkv_in = cur;
+        if (cur->type == GGML_TYPE_F32 &&
+                layer.q_w->type == GGML_TYPE_BF16 &&
+                layer.k_w->type == GGML_TYPE_BF16 &&
+                layer.v_w->type == GGML_TYPE_BF16) {
+            qkv_in = ggml_cast(ctx0, cur, GGML_TYPE_BF16);
+        }
+        ggml_tensor * Qcur = build_mm(layer.q_w, qkv_in);
+        ggml_tensor * Kcur = build_mm(layer.k_w, qkv_in);
+        ggml_tensor * Vcur = build_mm(layer.v_w, qkv_in);
         if (layer.q_b) {
             Qcur = ggml_add(ctx0, Qcur, layer.q_b);
         }

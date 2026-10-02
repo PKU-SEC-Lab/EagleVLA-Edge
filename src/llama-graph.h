@@ -103,6 +103,8 @@ struct llama_cross {
     std::vector<std::vector<float>> encoded_kv_data = std::vector<std::vector<float>>(max_layers);
 
     std::vector<ggml_tensor *> encoded_kv_gpu;
+    ggml_tensor *                 pi0_action_gpu            = nullptr;
+    ggml_tensor *                 pi0_time_gpu              = nullptr;
     bool                         pi0_use_gpu_kv              = false;
     mutable bool                 pi0_cross_kv_inputs_ready   = false;
     mutable bool                 pi0_decode_attn_mask_ready  = false;
@@ -110,6 +112,8 @@ struct llama_cross {
     int32_t pi0_decode_unroll = 1;
     int32_t pi0_decode_step = 0;
     bool    pi0_action_out_accumulated = false;
+    mutable bool pi0_action_input_ready = false;
+    mutable bool pi0_state_input_ready  = false;
 
     mutable double pi0_perf_set_kv_ms       = 0;
     mutable bool   pi0_perf_set_kv_skipped  = false;
@@ -316,8 +320,12 @@ public:
 
 class llm_graph_input_sinusoidal_embedding : public llm_graph_input_i {
 public:
-    llm_graph_input_sinusoidal_embedding(const llama_hparams & hparams, const llama_cross * cross, int32_t time_step_offset = 0)
-        : hparams(hparams), cross(cross), time_step_offset(time_step_offset) {}
+    llm_graph_input_sinusoidal_embedding(
+            const llama_hparams & hparams,
+            const llama_cross * cross,
+            ggml_backend_sched_t sched,
+            int32_t time_step_offset = 0)
+        : hparams(hparams), cross(cross), sched(sched), time_step_offset(time_step_offset) {}
     virtual ~llm_graph_input_sinusoidal_embedding() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
@@ -330,6 +338,7 @@ public:
 
     const llama_hparams hparams;
     const llama_cross * cross;
+    ggml_backend_sched_t sched = nullptr;
     const int32_t       time_step_offset = 0;
 };
 
@@ -378,6 +387,8 @@ public:
     const llama_hparams hparams;
     const llama_cross * cross;
     const int64_t action_num;
+    bool initialized = false;
+    int64_t last_prefix_offset = -1;
 };
 
 // PI0 RoPE bf16 freq_factors: corrects for PyTorch's bf16-truncated inv_freq
@@ -388,12 +399,13 @@ public:
     virtual ~llm_graph_input_rope_freq_factors_pi0() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
-    bool can_reuse(const llm_graph_params & params) override { return freq_factors != nullptr; }
+    bool can_reuse(const llm_graph_params &) override { return freq_factors != nullptr; }
     bool is_static_input() const override { return true; }
 
     ggml_tensor * freq_factors = nullptr; // F32 [n_rot/2]
     const int64_t n_rot;
     const float freq_base;
+    bool initialized = false;
 };
 
 // temperature tuning, used by llama4
@@ -1280,6 +1292,12 @@ struct llm_graph_context {
     virtual ~llm_graph_context() = default;
 
     void cb(ggml_tensor * cur, const char * name, int il) const;
+
+    // Pin a graph node to the backend owning an externally allocated tensor.
+    // This is required for persistent PI buffers because generic scheduling
+    // otherwise assigns view/copy nodes to CPU and splits the CUDA graph.
+    void set_tensor_backend_from_buffer(ggml_tensor * tensor, const ggml_tensor * reference) const;
+    void pin_persistent_pi_time_views() const;
 
     //
     // common

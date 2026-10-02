@@ -39,6 +39,41 @@ static __global__ void norm_f32(
 }
 
 template <int block_size>
+static __global__ void norm_affine_f32(
+        const float * x, const float * mul, const float * add, float * dst,
+        const int ncols, const int64_t stride_row, const int64_t stride_channel,
+        const int64_t stride_sample, const float eps) {
+    const int nrows     = gridDim.x;
+    const int nchannels = gridDim.y;
+    const int row       = blockIdx.x;
+    const int channel   = blockIdx.y;
+    const int sample    = blockIdx.z;
+    const int tid       = threadIdx.x;
+
+    x   += sample*stride_sample + channel*stride_channel + row*stride_row;
+    dst += ((sample*nchannels + channel)*nrows + row)*ncols;
+
+    float2 mean_var = make_float2(0.0f, 0.0f);
+    ggml_cuda_pdl_sync();
+    for (int col = tid; col < ncols; col += block_size) {
+        const float xi = x[col];
+        mean_var.x += xi;
+        mean_var.y += xi * xi;
+    }
+
+    extern __shared__ float2 s_sum2[];
+    mean_var = block_reduce<block_reduce_method::SUM, block_size>(mean_var, s_sum2);
+
+    const float mean = mean_var.x / ncols;
+    const float var = mean_var.y / ncols - mean * mean;
+    const float inv_std = rsqrtf(var + eps);
+    for (int col = tid; col < ncols; col += block_size) {
+        const float normalized = (x[col] - mean) * inv_std;
+        dst[col] = __fadd_rn(__fmul_rn(normalized, mul[col]), add[col]);
+    }
+}
+
+template <int block_size>
 static __global__ void group_norm_f32(const float * x, float * dst, const int group_size, const int ne_elements, const float eps) {
     // blockIdx.x: num_groups idx
     // threadIdx.x: block_size idx
@@ -290,6 +325,24 @@ static void norm_f32_cuda(
     }
 }
 
+static void norm_affine_f32_cuda(
+        const float * x, const float * mul, const float * add, float * dst,
+        const int ncols, const int nrows, const int nchannels, const int nsamples,
+        const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample,
+        const float eps, cudaStream_t stream) {
+    const dim3 blocks_num(nrows, nchannels, nsamples);
+    if (ncols < 1024) {
+        const dim3 block_dims(WARP_SIZE, 1, 1);
+        norm_affine_f32<WARP_SIZE><<<blocks_num, block_dims, 0, stream>>>(
+            x, mul, add, dst, ncols, stride_row, stride_channel, stride_sample, eps);
+    } else {
+        const dim3 block_dims(1024, 1, 1);
+        norm_affine_f32<1024><<<blocks_num, block_dims,
+            block_dims.x > WARP_SIZE ? 32 * sizeof(float2) : 0, stream>>>(
+            x, mul, add, dst, ncols, stride_row, stride_channel, stride_sample, eps);
+    }
+}
+
 static void group_norm_f32_cuda(
         const float * x, float * dst, const int num_groups, const float eps, const int group_size, const int ne_elements, cudaStream_t stream) {
     if (group_size < 1024) {
@@ -454,6 +507,36 @@ void ggml_cuda_op_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int64_t s03 = nb03 / ts0;
 
     norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+}
+
+void ggml_cuda_op_norm_affine(
+        ggml_backend_cuda_context & ctx,
+        ggml_tensor * norm,
+        ggml_tensor * mul,
+        ggml_tensor * add) {
+    const ggml_tensor * src = norm->src[0];
+    const ggml_tensor * scale = mul->src[0] == norm ? mul->src[1] : mul->src[0];
+    const ggml_tensor * bias = add->src[0] == mul ? add->src[1] : add->src[0];
+
+    GGML_ASSERT(src->type == GGML_TYPE_F32 && norm->type == GGML_TYPE_F32);
+    GGML_ASSERT(scale->type == GGML_TYPE_F32 && bias->type == GGML_TYPE_F32);
+    GGML_ASSERT(add->type == GGML_TYPE_F32);
+    GGML_ASSERT(scale->ne[0] == src->ne[0] && ggml_nelements(scale) == src->ne[0]);
+    GGML_ASSERT(bias->ne[0] == src->ne[0] && ggml_nelements(bias) == src->ne[0]);
+    GGML_ASSERT(ggml_is_contiguous(src) && ggml_is_contiguous(add));
+
+    float eps;
+    memcpy(&eps, norm->op_params, sizeof(float));
+    const int64_t s01 = src->nb[1] / sizeof(float);
+    const int64_t s02 = src->nb[2] / sizeof(float);
+    const int64_t s03 = src->nb[3] / sizeof(float);
+    norm_affine_f32_cuda(
+        (const float *) src->data,
+        (const float *) scale->data,
+        (const float *) bias->data,
+        (float *) add->data,
+        src->ne[0], src->ne[1], src->ne[2], src->ne[3],
+        s01, s02, s03, eps, ctx.stream());
 }
 
 void ggml_cuda_op_group_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

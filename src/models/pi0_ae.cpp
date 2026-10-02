@@ -1,5 +1,6 @@
 #include "models.h"
 #include "pi-model.h"
+#include "pi0-perf.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -184,6 +185,7 @@ llm_build_pi0_ae::llm_build_pi0_ae(const llama_model & model, const llm_graph_pa
 
     ggml_tensor * state = is_pi05 ? nullptr : build_inp_state();
     ggml_tensor * actions = build_inp_action();
+    std::vector<ggml_tensor *> persistent_action_nodes;
     if (is_pi05) {
         if (keep_debug) {
             mark_debug(actions, "action_in", -1);
@@ -466,13 +468,27 @@ llm_build_pi0_ae::llm_build_pi0_ae(const llama_model & model, const llm_graph_pa
             if (keep_debug) {
                 mark_debug(adarms, "pi05_dbg_ae_adarms_from_sinusoid", -1);
             }
-            res->action = run_ae_stack(actions, adarms);
+            ggml_tensor * velocity = run_ae_stack(actions, adarms);
+            if (llama_pi0_persistent_decode_enabled()) {
+                ggml_tensor * updated = ggml_add(ctx0, actions, ggml_scale(ctx0, velocity, dt));
+                res->action = ggml_cpy(ctx0, updated, actions);
+            } else {
+                res->action = velocity;
+            }
         } else {
             ggml_tensor * cur_actions = actions;
             for (int u = 0; u < n_unroll; ++u) {
                 ggml_tensor * time_u = build_inp_sinusoidal_embedding(u);
                 ggml_tensor * v_u    = run_ae_stack(cur_actions, pi05_adarms_from_sinusoid(time_u));
-                cur_actions = ggml_add(ctx0, cur_actions, ggml_scale(ctx0, v_u, dt));
+                ggml_tensor * updated = ggml_add(ctx0, cur_actions, ggml_scale(ctx0, v_u, dt));
+                // Keep each Euler result as an internal CUDA graph value. An
+                // in-place CPY to the external action tensor at every step
+                // makes the generic scheduler alternate CPU/CUDA splits on
+                // Thor, defeating whole-trajectory capture.
+                if (llama_pi0_persistent_decode_enabled()) {
+                    persistent_action_nodes.push_back(updated);
+                }
+                cur_actions = updated;
             }
             res->action = cur_actions;
         }
@@ -548,4 +564,11 @@ llm_build_pi0_ae::llm_build_pi0_ae(const llama_model & model, const llm_graph_pa
     }
 
     ggml_build_forward_expand(gf, res->action);
+    if (is_pi05 && llama_pi0_persistent_decode_enabled()) {
+        set_tensor_backend_from_buffer(actions, actions);
+        for (ggml_tensor * node : persistent_action_nodes) {
+            set_tensor_backend_from_buffer(node, actions);
+        }
+        pin_persistent_pi_time_views();
+    }
 }

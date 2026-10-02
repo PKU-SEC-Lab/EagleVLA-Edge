@@ -1599,7 +1599,14 @@ private:
         if (foreground.smpl != nullptr) {
             common_sampler_reset(foreground.smpl);
         }
-        llama_memory_clear(llama_get_memory(ctx_tgt), true);
+        // PI0/PI0.5 foreground inference does not consume the text KV payload:
+        // it materializes prefix K/V in the dedicated encoded-KV buffer. Reset
+        // the logical KV state without zeroing the multi-GiB text KV allocation.
+        // Physical clearing is retained for text and GR00T sessions.
+        const bool clear_memory_data =
+                foreground.policy_kind != foreground_policy_kind::pi0 &&
+                foreground.policy_kind != foreground_policy_kind::pi05;
+        llama_memory_clear(llama_get_memory(ctx_tgt), clear_memory_data);
     }
 
     void foreground_init_after_load() {
@@ -5769,6 +5776,7 @@ void server_routes::init_routes() {
         const json body = json::parse(req.body);
         const std::string raw_text = json_value(body, "text", std::string());
         const int n_predict = json_value(body, "n_predict", ctx_server.params_base.n_predict);
+        const bool compact_response = json_value(body, "compact", false);
 
         std::lock_guard<std::mutex> lock(ctx_server.foreground.mutex);
         if (ctx_server.foreground.policy_kind == foreground_policy_kind::gr00t_n1d7) {
@@ -5872,12 +5880,14 @@ void server_routes::init_routes() {
             {"pi_model", pi_model_kind_name(pi_model_kind_from_env())}
         };
         if (is_pi0) {
-            response["state"] = ctx_server.foreground.latest_state;
-            response["action"] = server_context_impl::reshape_action_rows(ctx_server.foreground.latest_pi0_result, false);
-            response["action_final"] = server_context_impl::reshape_action_rows(ctx_server.foreground.latest_pi0_result, true);
             response["action_final_raw"] = server_context_impl::reshape_action_raw_rows(ctx_server.foreground.latest_pi0_result, true);
-            response["joint_command"] = server_context_impl::slice_joint_command_rows(ctx_server.foreground.latest_pi0_result, false);
-            response["joint_command_final"] = server_context_impl::slice_joint_command_rows(ctx_server.foreground.latest_pi0_result, true);
+            if (!compact_response) {
+                response["state"] = ctx_server.foreground.latest_state;
+                response["action"] = server_context_impl::reshape_action_rows(ctx_server.foreground.latest_pi0_result, false);
+                response["action_final"] = server_context_impl::reshape_action_rows(ctx_server.foreground.latest_pi0_result, true);
+                response["joint_command"] = server_context_impl::slice_joint_command_rows(ctx_server.foreground.latest_pi0_result, false);
+                response["joint_command_final"] = server_context_impl::slice_joint_command_rows(ctx_server.foreground.latest_pi0_result, true);
+            }
             response["action_steps"] = ctx_server.foreground.latest_pi0_result.action_steps;
             response["action_dim"] = ctx_server.foreground.latest_pi0_result.action_dim;
             response["pi0_action_norm_debug"] = pi0_action_norm_debug_json();

@@ -301,9 +301,19 @@ llm_build_pi0::llm_build_pi0(const llama_model & model, const llm_graph_params &
 
         // self-attention
         {
-            ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
-            ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
-            ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
+            // cuBLAS otherwise converts the same F32 normalized activation
+            // independently for Q, K and V. Share one BF16 conversion when
+            // all three projections use BF16 weights.
+            ggml_tensor * qkv_in = cur;
+            if (cur->type == GGML_TYPE_F32 &&
+                    model.layers[il].wq->type == GGML_TYPE_BF16 &&
+                    model.layers[il].wk->type == GGML_TYPE_BF16 &&
+                    model.layers[il].wv->type == GGML_TYPE_BF16) {
+                qkv_in = ggml_cast(ctx0, cur, GGML_TYPE_BF16);
+            }
+            ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, qkv_in);
+            ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, qkv_in);
+            ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, qkv_in);
 
             if (keep_debug && il == 0) {
                 mark_debug(Qcur, "pi05_dbg_prefix_l0_q_mm", -1);
@@ -365,7 +375,15 @@ llm_build_pi0::llm_build_pi0(const llama_model & model, const llm_graph_params &
             }
 
             {
-                cur = build_ffn(cur,
+                // Parallel gate/up projections consume the same activation.
+                // Convert it once instead of once per GEMM.
+                ggml_tensor * ffn_in = cur;
+                if (cur->type == GGML_TYPE_F32 &&
+                        model.layers[il].ffn_up->type == GGML_TYPE_BF16 &&
+                        model.layers[il].ffn_gate->type == GGML_TYPE_BF16) {
+                    ffn_in = ggml_cast(ctx0, cur, GGML_TYPE_BF16);
+                }
+                cur = build_ffn(ffn_in,
                         model.layers[il].ffn_up,   NULL, NULL,
                         model.layers[il].ffn_gate, NULL, NULL,
                         model.layers[il].ffn_down, NULL, NULL,

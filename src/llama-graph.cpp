@@ -311,6 +311,9 @@ bool llm_graph_input_state_static::can_reuse(const llm_graph_params & params) {
 
 void llm_graph_input_state::set_input(const llama_ubatch * ubatch) {
     GGML_UNUSED(ubatch);
+    if (cross->pi0_state_input_ready) {
+        return;
+    }
     assert(cross->state.size() == hparams.action_dim);
     const int64_t action_dim = hparams.action_dim;
 
@@ -339,6 +342,9 @@ bool llm_graph_input_action_static::can_reuse(const llm_graph_params & params) {
 
 void llm_graph_input_action::set_input(const llama_ubatch * ubatch) {
     GGML_UNUSED(ubatch);
+    if (cross->pi0_action_input_ready) {
+        return;
+    }
     const int64_t action_num = hparams.action_steps;
     const int64_t action_dim = hparams.action_dim;
     const int64_t total_elements = action_num * action_dim;
@@ -388,6 +394,10 @@ bool llm_graph_input_ae_time_cond::can_reuse(const llm_graph_params & params) {
 
 void llm_graph_input_sinusoidal_embedding::set_input(const llama_ubatch * ubatch) {
     GGML_UNUSED(ubatch);
+    if (llama_pi0_persistent_decode_enabled() && time != nullptr &&
+            time->view_src == cross->pi0_time_gpu) {
+        return;
+    }
     const int64_t action_num = hparams.action_steps;
     const int64_t embd_ae = hparams.n_embd_ae;
     const int64_t total_elements = action_num * embd_ae;
@@ -446,7 +456,19 @@ void llm_graph_input_sinusoidal_embedding::set_input(const llama_ubatch * ubatch
     GGML_ASSERT(step_index >= 0);
     GGML_ASSERT(offset >= 0);
     GGML_ASSERT((size_t) (offset + total_elements) <= cross->ae_time_embeddings.size());
-    ggml_backend_tensor_set(time, cross->ae_time_embeddings.data() + offset, 0, total_elements * ggml_element_size(time));
+    const void * data = cross->ae_time_embeddings.data() + offset;
+    const size_t size = total_elements * ggml_element_size(time);
+    if (llama_pi0_persistent_decode_enabled()) {
+        // Queue the changing time embedding on the same backend stream as the
+        // decoder graph. A synchronous tensor_set uses cudaStreamPerThread and
+        // can overwrite this reusable input while the previous graph replay is
+        // still consuming it.
+        ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched, time);
+        GGML_ASSERT(backend != nullptr);
+        ggml_backend_tensor_set_async(backend, time, data, 0, size);
+    } else {
+        ggml_backend_tensor_set(time, data, 0, size);
+    }
 }
 
 
@@ -461,6 +483,37 @@ bool llm_graph_input_sinusoidal_embedding::can_reuse(const llm_graph_params & pa
             && hparams.n_embd_ae    == params.hparams.n_embd_ae;
     }
     return cross == nullptr || cross->pi0_decode_unroll > 0;
+}
+
+void llm_graph_context::set_tensor_backend_from_buffer(
+        ggml_tensor * tensor, const ggml_tensor * reference) const {
+    GGML_ASSERT(tensor != nullptr);
+    GGML_ASSERT(reference != nullptr);
+    GGML_ASSERT(reference->buffer != nullptr);
+    ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(reference->buffer);
+    const int n_backends = ggml_backend_sched_get_n_backends(sched);
+    for (int i = 0; i < n_backends; ++i) {
+        ggml_backend_t backend = ggml_backend_sched_get_backend(sched, i);
+        if (ggml_backend_sched_get_buffer_type(sched, backend) == buft &&
+                ggml_backend_supports_op(backend, tensor)) {
+            ggml_backend_sched_set_tensor_backend(sched, tensor, backend);
+            return;
+        }
+    }
+    GGML_ABORT("failed to find scheduler backend for persistent PI tensor");
+}
+
+void llm_graph_context::pin_persistent_pi_time_views() const {
+    if (cross == nullptr || cross->pi0_time_gpu == nullptr || gf == nullptr) {
+        return;
+    }
+    set_tensor_backend_from_buffer(cross->pi0_time_gpu, cross->pi0_time_gpu);
+    for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
+        ggml_tensor * node = ggml_graph_node(gf, i);
+        if (node->view_src == cross->pi0_time_gpu) {
+            set_tensor_backend_from_buffer(node, cross->pi0_time_gpu);
+        }
+    }
 }
 
 void llm_graph_input_gr00t_dit_time::set_input(const llama_ubatch * ubatch) {
@@ -557,12 +610,18 @@ void llm_graph_input_pos_ae::set_input(const llama_ubatch * ubatch) {
             ofs << "]\n";
         }
     }
+    if (initialized && last_prefix_offset == prefix_offset) {
+        return;
+    }
     ggml_backend_tensor_set(pos, pos_data.data(), 0, action_num*ggml_element_size(pos));
+    initialized = true;
+    last_prefix_offset = prefix_offset;
 }
 
 void llm_graph_input_rope_freq_factors_pi0::set_input(const llama_ubatch * ubatch) {
     GGML_UNUSED(ubatch);
     if (freq_factors == nullptr) return;
+    if (initialized) return;
     const int64_t n = n_rot / 2;
     std::vector<float> ff(n);
     for (int64_t i = 0; i < n; ++i) {
@@ -572,6 +631,7 @@ void llm_graph_input_rope_freq_factors_pi0::set_input(const llama_ubatch * ubatc
         ff[i] = (inv_freq_bf16 != 0.0f) ? (inv_freq_f32 / inv_freq_bf16) : 1.0f;
     }
     ggml_backend_tensor_set(freq_factors, ff.data(), 0, n * sizeof(float));
+    initialized = true;
 }
 
 bool llm_graph_input_pos_ae::can_reuse(const llm_graph_params & params) {
@@ -3095,7 +3155,12 @@ ggml_tensor * llm_graph_context::build_inp_action() const {
     auto inp = std::make_unique<llm_graph_input_action>(hparams,cross);
     auto & cur = inp->action;
 
-    cur = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_action_dim, n_action_num,1);
+    if (cross != nullptr && cross->pi0_action_gpu != nullptr) {
+        cur = cross->pi0_action_gpu;
+        set_tensor_backend_from_buffer(cur, cross->pi0_action_gpu);
+    } else {
+        cur = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_action_dim, n_action_num, 1);
+    }
     ggml_set_input(cur);
 
     res->add_input(std::move(inp));
@@ -3135,11 +3200,23 @@ ggml_tensor * llm_graph_context::build_inp_ae_time_cond() const {
 
 ggml_tensor * llm_graph_context::build_inp_sinusoidal_embedding(int32_t time_step_offset) const {
     const int64_t n_action_num = hparams.action_steps;
-    auto inp = std::make_unique<llm_graph_input_sinusoidal_embedding>(hparams, cross, time_step_offset);
+    auto inp = std::make_unique<llm_graph_input_sinusoidal_embedding>(hparams, cross, sched, time_step_offset);
 
     auto & cur = inp->time;
-    cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd_ae, n_action_num);
-    ggml_set_input(cur);
+    if (cross != nullptr && cross->pi0_time_gpu != nullptr && llama_pi0_persistent_decode_enabled()) {
+        const int64_t step = (int64_t) cross->pi0_decode_step + time_step_offset;
+        GGML_ASSERT(step >= 0 && step < (int64_t) hparams.inference_steps);
+        cur = ggml_view_2d(
+            ctx0, cross->pi0_time_gpu,
+            hparams.n_embd_ae, n_action_num,
+            cross->pi0_time_gpu->nb[1],
+            (size_t) step * cross->pi0_time_gpu->nb[2]);
+        set_tensor_backend_from_buffer(cross->pi0_time_gpu, cross->pi0_time_gpu);
+        set_tensor_backend_from_buffer(cur, cross->pi0_time_gpu);
+    } else {
+        cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd_ae, n_action_num);
+        ggml_set_input(cur);
+    }
 
     res->add_input(std::move(inp));
 

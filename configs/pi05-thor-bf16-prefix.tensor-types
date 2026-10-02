@@ -1,0 +1,1 @@
+^(token_embd[.]weight|blk[.]([0-9]|1[0-7])[.])=bf16

@@ -3712,6 +3712,32 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         return fused_node_count - 1;
     }
 
+    if (ggml_can_fuse(cgraph, i, { GGML_OP_NORM, GGML_OP_MUL, GGML_OP_ADD })) {
+        ggml_tensor * norm = cgraph->nodes[i];
+        ggml_tensor * mul  = cgraph->nodes[i + 1];
+        ggml_tensor * add  = cgraph->nodes[i + 2];
+
+        const ggml_tensor * scale = mul->src[0] == norm ? mul->src[1] : mul->src[0];
+        const ggml_tensor * bias  = add->src[0] == mul  ? add->src[1] : add->src[0];
+        const int out_nodes[] = { i + 2 };
+
+        const bool supported =
+            norm->src[0]->type == GGML_TYPE_F32 && norm->type == GGML_TYPE_F32 &&
+            mul->type == GGML_TYPE_F32 && add->type == GGML_TYPE_F32 &&
+            scale->type == GGML_TYPE_F32 && bias->type == GGML_TYPE_F32 &&
+            ggml_are_same_shape(norm, mul) && ggml_are_same_shape(mul, add) &&
+            ggml_nelements(scale) == norm->ne[0] && scale->ne[0] == norm->ne[0] &&
+            ggml_nelements(bias) == norm->ne[0] && bias->ne[0] == norm->ne[0] &&
+            ggml_is_contiguous(norm->src[0]) && ggml_is_contiguous(add) &&
+            ggml_is_contiguous(scale) && ggml_is_contiguous(bias) &&
+            ggml_cuda_check_fusion_memory_ranges(cgraph, i, 3, out_nodes, 1);
+
+        if (supported) {
+            ggml_cuda_op_norm_affine(*cuda_ctx, norm, mul, add);
+            return 2;
+        }
+    }
+
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD }, {})) {
         ggml_cuda_op_rms_norm_fused_add(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2]);
         return 2;

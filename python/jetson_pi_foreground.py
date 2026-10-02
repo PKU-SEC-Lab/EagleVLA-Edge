@@ -18,9 +18,15 @@ DEFAULT_MMPROJ_PATH = "/data/home/yzb/model/gguf/vit/mmproj-model-f16_NEW.gguf"
 
 
 class ForegroundSession:
-    def __init__(self, base_url: str = "http://127.0.0.1:8080", timeout: float = 300.0):
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8080",
+        timeout: float = 300.0,
+        compact: bool = True,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.compact = compact
         self._state_dim = 0
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
@@ -62,7 +68,11 @@ class ForegroundSession:
     def infer(self, prompt: str) -> tuple[np.ndarray, dict]:
         if not prompt:
             raise ValueError("prompt must not be empty")
-        response = self._request("POST", "/foreground/infer", {"text": prompt})
+        response = self._request(
+            "POST",
+            "/foreground/infer",
+            {"text": prompt, "compact": self.compact},
+        )
         action = np.asarray(response.get("action_final_raw", response.get("action_final")), dtype=np.float32)
         if action.ndim == 1:
             steps = int(response.get("action_steps", 0))
@@ -100,9 +110,10 @@ class ManagedForegroundSession(ForegroundSession):
         noise_path: str | None = None,
         startup_timeout: float = 300.0,
         timeout: float = 300.0,
+        compact: bool = True,
         log_path: str | None = None,
     ):
-        super().__init__(f"http://{host}:{port}", timeout)
+        super().__init__(f"http://{host}:{port}", timeout, compact=compact)
         for name, path in (
             ("server", server_path),
             ("model", model_path),

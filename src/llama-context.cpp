@@ -13,6 +13,7 @@
 #include "llama.h"
 #include "pi-model.h"
 #include "pi05-debug-dump.h"
+#include "pi0-perf.h"
 
 #include <cinttypes>
 #include <cmath>
@@ -31,6 +32,11 @@ static void pi0_fetch_action_to_host(
         ggml_tensor * action,
         void * dst,
         size_t nbytes) {
+    ggml_backend_buffer_t buffer = action->view_src ? action->view_src->buffer : action->buffer;
+    if (buffer != nullptr && ggml_backend_buffer_is_host(buffer)) {
+        ggml_backend_tensor_get(action, dst, 0, nbytes);
+        return;
+    }
     ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched, action);
     if (backend != nullptr) {
         ggml_backend_tensor_get_async(backend, action, dst, 0, nbytes);
@@ -124,6 +130,14 @@ int32_t llama_pi0_decode_unroll_steps(bool is_pi05, int32_t inference_steps) {
         return 1;
     }
     return requested > inference_steps ? inference_steps : requested;
+}
+
+bool llama_pi0_persistent_decode_enabled() {
+    static const bool enabled = []() {
+        const char * env = std::getenv("PI0_PERSISTENT_CUDA_GRAPH");
+        return env != nullptr && env[0] != '\0' && std::atoi(env) != 0;
+    }();
+    return enabled;
 }
 #include <limits>
 #include <stdexcept>
@@ -657,6 +671,12 @@ void llama_context::sched_reserve() {
     gf_res_reserve.reset(new llm_graph_result(max_nodes));
 
     sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, cparams.pipeline_parallel, cparams.op_offload));
+    if (llama_pi0_persistent_decode_enabled()) {
+        gf_res_pi_decoder.reset(new llm_graph_result(max_nodes));
+        sched_pi_decoder.reset(ggml_backend_sched_new(
+                backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes,
+                cparams.pipeline_parallel, cparams.op_offload));
+    }
 
     llama_memory_context_ptr mctx;
     if (memory) {
@@ -763,6 +783,9 @@ void llama_context::synchronize() {
     }
 
     ggml_backend_sched_synchronize(sched.get());
+    if (sched_pi_decoder) {
+        ggml_backend_sched_synchronize(sched_pi_decoder.get());
+    }
 
     // FIXME: if multiple single tokens are evaluated without a synchronization,
     // the stats will be added to the prompt evaluation stats
@@ -1541,9 +1564,13 @@ void llama_context::pi0_clear_cross_kv() {
     pi0_enc_kv_gpu.ctx.reset();
     pi0_enc_kv_gpu.buf.reset();
     pi0_enc_kv_gpu.tensors.clear();
+    pi0_enc_kv_gpu.action = nullptr;
+    pi0_enc_kv_gpu.time = nullptr;
     pi0_enc_kv_gpu.kv_tokens = 0;
 
     cross.encoded_kv_gpu.clear();
+    cross.pi0_action_gpu             = nullptr;
+    cross.pi0_time_gpu               = nullptr;
     cross.pi0_use_gpu_kv             = false;
     cross.pi0_cross_kv_inputs_ready  = false;
     cross.pi0_decode_attn_mask_ready = false;
@@ -1593,9 +1620,10 @@ void llama_context::pi0_refresh_encoded_kv_gpu(const std::vector<ggml_tensor *> 
         pi0_enc_kv_gpu.ctx.reset();
         pi0_enc_kv_gpu.buf.reset();
         pi0_enc_kv_gpu.tensors.clear();
+        pi0_enc_kv_gpu.action = nullptr;
 
         ggml_init_params params = {
-            /*.mem_size   =*/ size_t(n_layer + 1) * ggml_tensor_overhead(),
+            /*.mem_size   =*/ size_t(n_layer + 2) * ggml_tensor_overhead(),
             /*.mem_buffer =*/ nullptr,
             /*.no_alloc   =*/ true,
         };
@@ -1613,6 +1641,15 @@ void llama_context::pi0_refresh_encoded_kv_gpu(const std::vector<ggml_tensor *> 
                 pi0_enc_kv_gpu.ctx.get(), GGML_TYPE_F32, n_embd_head, n_head_kv_layer, kv_tokens);
             ggml_format_name(pi0_enc_kv_gpu.tensors[i], "pi0_enc_kv_%d", i);
         }
+        pi0_enc_kv_gpu.action = ggml_new_tensor_2d(
+            pi0_enc_kv_gpu.ctx.get(), GGML_TYPE_F32, hparams.action_dim, hparams.action_steps);
+        ggml_set_name(pi0_enc_kv_gpu.action, "action_in");
+        ggml_set_input(pi0_enc_kv_gpu.action);
+        pi0_enc_kv_gpu.time = ggml_new_tensor_3d(
+            pi0_enc_kv_gpu.ctx.get(), GGML_TYPE_F32,
+            hparams.n_embd_ae, hparams.action_steps, hparams.inference_steps);
+        ggml_set_name(pi0_enc_kv_gpu.time, "pi0_time_in");
+        ggml_set_input(pi0_enc_kv_gpu.time);
 
         pi0_enc_kv_gpu.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(pi0_enc_kv_gpu.ctx.get(), buft));
         if (!pi0_enc_kv_gpu.buf) {
@@ -1624,6 +1661,8 @@ void llama_context::pi0_refresh_encoded_kv_gpu(const std::vector<ggml_tensor *> 
     }
 
     cross.encoded_kv_gpu.assign(n_layer, nullptr);
+    cross.pi0_action_gpu = pi0_enc_kv_gpu.action;
+    cross.pi0_time_gpu = pi0_enc_kv_gpu.time;
     for (int i = 0; i < n_layer && i < (int) src.size(); ++i) {
         if (src[i] == nullptr || pi0_enc_kv_gpu.tensors[i] == nullptr) {
             continue;
@@ -1644,29 +1683,40 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         return nullptr;
     }
 
-    auto * res = gf_res_prev.get();
+    const bool persistent_pi_decoder =
+            gtype == LLM_GRAPH_TYPE_DECODER && llama_pi0_persistent_decode_enabled();
+    ggml_backend_sched_t active_sched = persistent_pi_decoder
+            ? sched_pi_decoder.get()
+            : sched.get();
+    auto * res = persistent_pi_decoder
+            ? gf_res_pi_decoder.get()
+            : gf_res_prev.get();
+    GGML_ASSERT(active_sched != nullptr);
+    GGML_ASSERT(res != nullptr);
     auto * gf  = res->get_gf();
 
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
-    const auto gparams = graph_params(res, ubatch, mctx, gtype);
+    auto gparams = graph_params(res, ubatch, mctx, gtype);
+    gparams.sched = active_sched;
 
-    if (!graph_reuse_disable && res->can_reuse(gparams)) {
+    const bool can_reuse_graph = !graph_reuse_disable && res->can_reuse(gparams);
+    if (can_reuse_graph) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         // with pipeline parallelism, the previous graph_compute_async may still be running
         // on the GPU. we must synchronize before set_inputs to avoid overwriting input tensors
         // that the previous compute is still reading.
         if (cparams.pipeline_parallel) {
-            ggml_backend_sched_synchronize(sched.get());
+            ggml_backend_sched_synchronize(active_sched);
         }
 
         n_reused++;
     } else {
         res->reset();
 
-        ggml_backend_sched_reset(sched.get());
-        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+        ggml_backend_sched_reset(active_sched);
+        ggml_backend_sched_set_eval_callback(active_sched, cparams.cb_eval, cparams.cb_eval_user_data);
 
         //const auto t_start_us = ggml_time_us();
 
@@ -1680,7 +1730,32 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             return nullptr;
         }
 
-        if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
+        if (gtype == LLM_GRAPH_TYPE_DECODER && llama_pi0_persistent_decode_enabled() &&
+                cross.pi0_action_gpu != nullptr && cross.pi0_action_gpu->buffer != nullptr) {
+            ggml_backend_buffer_type_t action_buft =
+                ggml_backend_buffer_get_type(cross.pi0_action_gpu->buffer);
+            ggml_backend_t persistent_backend = nullptr;
+            for (size_t i = 0; i < backend_ptrs.size(); ++i) {
+                if (backend_buft[i] == action_buft) {
+                    persistent_backend = backend_ptrs[i];
+                    break;
+                }
+            }
+            GGML_ASSERT(persistent_backend != nullptr);
+
+            // The full PI0.5 action trajectory is intentionally device-only.
+            // Pin every supported node after graph construction (immediately
+            // before scheduler allocation) so generic placement cannot insert
+            // CPU islands between flow steps and fragment CUDA Graph capture.
+            for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
+                ggml_tensor * node = ggml_graph_node(gf, i);
+                if (ggml_backend_supports_op(persistent_backend, node)) {
+                    ggml_backend_sched_set_tensor_backend(active_sched, node, persistent_backend);
+                }
+            }
+        }
+
+        if (!ggml_backend_sched_alloc_graph(active_sched, gf)) {
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             ret = GGML_STATUS_ALLOC_FAILED;
             return nullptr;
@@ -1697,7 +1772,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
-    const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1, active_sched);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
@@ -2376,12 +2451,28 @@ int llama_context::decode(const llama_batch & batch_inp) {
             }
         }
 
+        if (is_pi05 && llama_pi0_persistent_decode_enabled() && cross.pi0_time_gpu != nullptr) {
+            const size_t time_nbytes = cross.ae_time_embeddings.size() * sizeof(float);
+            GGML_ASSERT(time_nbytes == ggml_nbytes(cross.pi0_time_gpu));
+            // The complete table is immutable for the lifetime of the model.
+            // Upload it once so every unrolled step is a direct device view and
+            // the scheduler can keep all ten steps in one CUDA graph split.
+            ggml_backend_tensor_set(cross.pi0_time_gpu, cross.ae_time_embeddings.data(), 0, time_nbytes);
+        }
+
         cross.pi0_cross_kv_inputs_ready  = false;
         cross.pi0_decode_attn_mask_ready = false;
+        cross.pi0_action_input_ready     = false;
+        cross.pi0_state_input_ready      = false;
 
         std::vector<float> action_data((size_t) total_action_elements);
-        const int32_t unroll_cfg = llama_pi0_decode_unroll_steps(is_pi05, hparams.inference_steps);
-        for (int32_t step = 0; step < hparams.inference_steps; ) {
+        const bool persistent_decode = is_pi05 &&
+                llama_pi0_persistent_decode_enabled() && !pi05_debug_binary_enabled();
+        const int32_t unroll_cfg = persistent_decode
+            ? (int32_t) hparams.inference_steps
+            : llama_pi0_decode_unroll_steps(is_pi05, hparams.inference_steps);
+        ggml_tensor * persistent_action = nullptr;
+        for (int32_t step = 0; step < (int32_t) hparams.inference_steps; ) {
             const int32_t steps_left = hparams.inference_steps - step;
             const int32_t unroll = unroll_cfg >= 2 && steps_left >= 2
                 ? std::min(unroll_cfg, steps_left)
@@ -2391,7 +2482,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
             cross.pi0_decode_step = step;
             cross.pi0_decode_unroll = unroll;
             cross.pi0_action_out_accumulated = false;
-            cross.pi0_cross_kv_inputs_ready = false;
+            if (!persistent_decode || step == 0) {
+                cross.pi0_cross_kv_inputs_ready = false;
+            }
 
             if (is_pi05 && pi05_debug_binary_enabled()) {
                 const std::string dump_name = "action_before_step_" + std::to_string(step);
@@ -2402,7 +2495,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
                         { action_dim, action_num });
             }
 
-            synchronize();
+            if (!persistent_decode || step == 0) {
+                synchronize();
+            }
 
             ggml_status status;
             const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, nullptr, status);
@@ -2421,6 +2516,13 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 return -3;
             }
             const size_t action_nbytes = (size_t) total_action_elements * ggml_element_size(action);
+            if (persistent_decode) {
+                persistent_action = action;
+                cross.pi0_action_input_ready = true;
+                cross.pi0_state_input_ready = true;
+                step += unroll;
+                continue;
+            }
             pi0_fetch_action_to_host(sched.get(), action, action_data.data(), action_nbytes);
 
             if (is_pi05 && pi05_debug_binary_enabled()) {
@@ -2460,6 +2562,16 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 }
             }
             step += unroll;
+        }
+
+        if (persistent_decode) {
+            if (persistent_action == nullptr) {
+                LLAMA_LOG_ERROR("%s: persistent PI0 decoder produced no action tensor\n", __func__);
+                return -3;
+            }
+            const size_t action_nbytes = (size_t) total_action_elements * ggml_element_size(persistent_action);
+            pi0_fetch_action_to_host(sched_pi_decoder.get(), persistent_action, action_data.data(), action_nbytes);
+            std::copy(action_data.begin(), action_data.end(), cross.action.begin());
         }
 
         cross.encoded_kv_gpu.clear();
@@ -3146,7 +3258,8 @@ llm_graph_params llama_context::graph_params(
 
 ggml_status llama_context::graph_compute(
             ggml_cgraph * gf,
-                   bool   batched) {
+                   bool   batched,
+    ggml_backend_sched_t   compute_sched) {
     int n_threads        = batched ? cparams.n_threads_batch : cparams.n_threads;
     ggml_threadpool_t tp = batched ? threadpool_batch        : threadpool;
 
@@ -3163,7 +3276,8 @@ ggml_status llama_context::graph_compute(
         set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
     }
 
-    auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
+    ggml_backend_sched_t active_sched = compute_sched != nullptr ? compute_sched : sched.get();
+    auto status = ggml_backend_sched_graph_compute_async(active_sched, gf);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
     }

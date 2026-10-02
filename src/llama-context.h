@@ -262,7 +262,10 @@ public:
     llm_graph_result * get_gf_res_reserve() const;
 
     // returns the result of ggml_backend_sched_graph_compute_async execution
-    ggml_status graph_compute(ggml_cgraph * gf, bool batched);
+    ggml_status graph_compute(
+            ggml_cgraph * gf,
+                   bool   batched,
+    ggml_backend_sched_t   compute_sched = nullptr);
 
     // reserve a graph with a dummy ubatch of the specified size
     ggml_cgraph * graph_reserve(
@@ -362,6 +365,7 @@ private:
     std::vector<swap_info> output_swaps;
 
     ggml_backend_sched_ptr sched;
+    ggml_backend_sched_ptr sched_pi_decoder;
 
     bool sched_need_reserve = true;
 
@@ -386,11 +390,14 @@ private:
 
     llm_graph_result_ptr gf_res_prev;
     llm_graph_result_ptr gf_res_reserve;
+    llm_graph_result_ptr gf_res_pi_decoder;
 
     struct pi0_encoded_kv_gpu_storage {
         ggml_context_ptr            ctx;
         ggml_backend_buffer_ptr     buf;
         std::vector<ggml_tensor *>  tensors;
+        ggml_tensor *               action = nullptr;
+        ggml_tensor *               time = nullptr;
         int64_t                     kv_tokens = 0;
     };
 

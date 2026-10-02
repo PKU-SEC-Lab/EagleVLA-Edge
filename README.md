@@ -14,7 +14,7 @@
     <a href="https://arxiv.org/abs/2607.12659"><img src="https://img.shields.io/badge/arXiv-2607.12659-b31b1b.svg" alt="arXiv" /></a>
     <a href="https://www.corl.org/"><img src="https://img.shields.io/badge/CoRL-2026_Accepted-6f42c1.svg" alt="Accepted at CoRL 2026" /></a>
     <a href="https://github.com/PKU-SEC-Lab/EagleVLA"><img src="https://img.shields.io/badge/EagleVLA-Algorithm-35b8a9.svg" alt="EagleVLA algorithm" /></a>
-    <a href="https://huggingface.co/diantoudefengshan/Jetson-PI-GGUF"><img src="https://img.shields.io/badge/Model-GGUF-f5c542.svg" alt="GGUF checkpoints" /></a>
+    <a href="https://huggingface.co/diantoudefengshan/EagleVLA-GGUF"><img src="https://img.shields.io/badge/Model-GGUF-f5c542.svg" alt="GGUF checkpoints" /></a>
     <a href="https://github.com/ggml-org/llama.cpp"><img src="https://img.shields.io/badge/Based_on-llama.cpp-3578c8.svg" alt="Based on llama.cpp" /></a>
     <a href="https://github.com/flashrt-project/FlashRT"><img src="https://img.shields.io/badge/Support-FlashRT-f28c45.svg" alt="Support FlashRT" /></a>
   </p>
@@ -35,7 +35,7 @@
 ## News
 
 - **[2026/09] 🎉🎉🎉 EagleVLA has been accepted as a Spotlight at CoRL 2026!**
-- **[2026/08] Pre-converted GGUF checkpoints are available.** Ready-to-use PI0, PI0.5, and GR00T N1.7 main-model and vision-projector GGUF files are released on [Hugging Face](https://huggingface.co/diantoudefengshan/Jetson-PI-GGUF).
+- **[2026/08] Pre-converted GGUF checkpoints are available.** Ready-to-use PI0, PI0.5, and GR00T N1.7 main-model and vision-projector GGUF files are released on [Hugging Face](https://huggingface.co/diantoudefengshan/EagleVLA-GGUF).
 - **[2026/08] NVIDIA Isaac GR00T N1.7 inference is available.** Convert the official checkpoint to GGUF and run the complete Qwen3-VL backbone, Action Head, and four-step action flow through either `libjetson_pi_gr00t` or the foreground HTTP server.
 - **[2026/07] Python APIs are available.** Use the managed foreground NumPy client for persistent `llama-server` sessions or the optional pybind11 module for in-process PI0/PI0.5 action inference.
 - **[2026/07] Updated to the latest llama.cpp codebase.** EagleVLA-Edge now tracks the latest llama.cpp architecture while retaining PI0/PI0.5 inference, foreground server, and FlashRT integration support.
@@ -146,7 +146,7 @@ The runtime expects two matching files:
 - a PI language/action model in GGUF format;
 - a SigLIP vision encoder/projector in GGUF format.
 
-Convert a PI0 or PI0.5 checkpoint by following [Model Preparation](https://github.com/PKU-SEC-Lab/EagleVLA-Edge/blob/master/docs/model_conversion.md), or download the ready-to-use GGUF checkpoints directly from [Hugging Face](https://huggingface.co/diantoudefengshan/Jetson-PI-GGUF).
+Convert a PI0 or PI0.5 checkpoint by following [Model Preparation](https://github.com/PKU-SEC-Lab/EagleVLA-Edge/blob/master/docs/model_conversion.md), or download the ready-to-use GGUF checkpoints directly from [Hugging Face](https://huggingface.co/diantoudefengshan/EagleVLA-GGUF).
 
 ### 3. Start the foreground server
 
@@ -229,8 +229,8 @@ cmake -S . -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target jetson_pi_gr00t llama-server -j
 ```
 
-Download the ready-to-use BF16 [GR00T N1.7 main GGUF](https://huggingface.co/diantoudefengshan/Jetson-PI-GGUF/resolve/main/gr00t-n1d7/gr00t-n1d7-bf16.gguf)
-and matching [vision-projector GGUF](https://huggingface.co/diantoudefengshan/Jetson-PI-GGUF/resolve/main/gr00t-n1d7/mmproj-gr00t-n1d7-bf16.gguf),
+Download the ready-to-use BF16 [GR00T N1.7 main GGUF](https://huggingface.co/diantoudefengshan/EagleVLA-GGUF/resolve/main/gr00t-n1d7/gr00t-n1d7-bf16.gguf)
+and matching [vision-projector GGUF](https://huggingface.co/diantoudefengshan/EagleVLA-GGUF/resolve/main/gr00t-n1d7/mmproj-gr00t-n1d7-bf16.gguf),
 or convert the official GR00T and Cosmos checkpoints by following the
 [GR00T validation and conversion guide](tools/gr00t-reference/README.md). Always use
 the main model and mmproj from the same release directory.

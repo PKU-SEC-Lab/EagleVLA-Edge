@@ -441,7 +441,7 @@ Latency is measured in milliseconds. The following values are P50 model-side lat
 
 | Runtime configuration | ViT | LLM | Action Expert | Total |
 |---|---:|---:|---:|---:|
-| Naive PI0.5 | 42.7 | 118.9 | 88.0 | 249.5 |
+| Naive PI0.5 | 61.7 | 187.0 | 209.2 | 457.9 |
 | + Graph reuse (without GPU KV or unroll) | 32.0 | 92.3 | 115.7 | 240.0 |
 | + Intermediate buffer, GPU KV, and unroll | **32.0** | **91.3** | **79.5** | **202.8** |
 

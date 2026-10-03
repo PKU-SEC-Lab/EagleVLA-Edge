@@ -425,27 +425,25 @@ See the [FlashRT repository](https://github.com/flashrt-project/FlashRT) for ins
 
 
 
-## Performance on Jetson Orin
+## Performance on Jetson Orin and Thor
 
-Latency is measured in milliseconds on NVIDIA Jetson Orin in MAXN mode. See the paper for the complete experimental setup and end-to-end control results.
+Latency is measured in milliseconds. The following values are P50 model-side latency for PI0.5 with two 224×224 views, 10 diffusion steps, and 10 actions; `Total` is the sum of ViT, LLM, and Action Expert. See the paper for the complete experimental setup and end-to-end control results.
 
-### PI0
-
-| Runtime configuration | ViT | LLM | Action Expert | Total |
-|---|---:|---:|---:|---:|
-| Naive PI0 | 143.5 | 601.9 | 505.5 | 1250.9 |
-| + Schedule optimization | 147.1 | 603.1 | 501.3 | 1251.5 |
-| + Graph reuse | 76.8 | 200.6 | 167.0 | 444.4 |
-| + Intermediate buffer and unroll | **75.4** | **200.3** | **118.8** | **394.5** |
-
-### PI0.5
+### PI0.5 on NVIDIA Jetson Orin
 
 | Runtime configuration | ViT | LLM | Action Expert | Total |
 |---|---:|---:|---:|---:|
 | Naive PI0.5 | 152.3 | 631.0 | 536.8 | 1420.8 |
-| + Schedule optimization | 152.3 | 631.0 | 536.8 | 1420.8 |
 | + Graph reuse | 79.5 | 212.6 | 184.0 | 476.1 |
-| + Intermediate buffer and unroll | **79.5** | **210.3** | **123.1** | **412.9** |
+| + Intermediate buffer, GPU KV, and unroll | **72.3** | **194.8** | **107.8** | **374.9** |
+
+### PI0.5 on NVIDIA Jetson Thor
+
+| Runtime configuration | ViT | LLM | Action Expert | Total |
+|---|---:|---:|---:|---:|
+| Naive PI0.5 | 42.7 | 118.9 | 88.0 | 249.5 |
+| + Graph reuse (without GPU KV or unroll) | 32.0 | 92.3 | 115.7 | 240.0 |
+| + Intermediate buffer, GPU KV, and unroll | **32.0** | **91.3** | **79.5** | **202.8** |
 
 
 ## Documentation

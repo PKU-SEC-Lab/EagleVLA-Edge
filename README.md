@@ -434,8 +434,8 @@ Latency is measured in milliseconds. The following values are P50 model-side lat
 | Runtime configuration | ViT | LLM | Action Expert | Total |
 |---|---:|---:|---:|---:|
 | Naive PI0.5 | 152.3 | 631.0 | 536.8 | 1420.8 |
-| + Graph reuse | 79.5 | 212.6 | 184.0 | 476.1 |
-| + Intermediate buffer, GPU KV, and unroll | **72.3** | **194.8** | **107.8** | **374.9** |
+| + Graph reuse | 71.9 | 196.9 | 143.9 | 412.9 |
+| + Intermediate buffer, GPU KV, and unroll | **71.9** | **194.8** | **107.8** | **374.5** |
 
 ### PI0.5 on NVIDIA Jetson Thor
 

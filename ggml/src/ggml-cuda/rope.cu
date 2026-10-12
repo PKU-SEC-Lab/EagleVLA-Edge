@@ -2,6 +2,9 @@
 #include "ggml-cuda/common.cuh"
 #include "ggml.h"
 #include "rope.cuh"
+#ifdef GGML_CUDA_FLASHRT
+#include "flashrt-rope.cuh"
+#endif
 
 struct rope_corr_dims {
     float v[2];
@@ -660,6 +663,9 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx,
 }
 
 void ggml_cuda_op_rope(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+#ifdef GGML_CUDA_FLASHRT
+    if (ggml_cuda_flashrt_rope(ctx, dst)) { return; }
+#endif
     ggml_cuda_op_rope_impl<true>(ctx, dst);
 }
 

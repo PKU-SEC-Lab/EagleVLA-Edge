@@ -131,6 +131,10 @@ if (CUDAToolkit_FOUND)
 
     add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
 
+    if (GGML_CUDA_FLASHRT)
+        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_FLASHRT)
+    endif()
+
     if (GGML_CUDA_GRAPHS)
         add_compile_definitions(GGML_CUDA_USE_GRAPHS)
     endif()
@@ -174,6 +178,10 @@ if (CUDAToolkit_FOUND)
             target_link_libraries(ggml-cuda PRIVATE  CCCL::CCCL)
         endif()
         target_link_libraries(ggml-cuda PRIVATE CUDA::cudart CUDA::cublas)
+    endif()
+
+    if (GGML_CUDA_FLASHRT AND (NOT GGML_STATIC OR WIN32))
+        target_link_libraries(ggml-cuda PRIVATE CUDA::cublasLt)
     endif()
 
     if (GGML_CUDA_NO_VMM)

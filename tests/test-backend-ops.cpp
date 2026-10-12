@@ -3449,6 +3449,84 @@ struct test_norm_mul_add : public test_case {
         return out;
     }
 };
+// SigLIP-style channel-vector affine LayerNorm and dispatch-negative controls.
+struct test_flashrt_layernorm : public test_case {
+    const int64_t width;
+    const int64_t rows;
+    const int variant;
+
+    test_flashrt_layernorm(int64_t width, int64_t rows, int variant = 0)
+        : width(width), rows(rows), variant(variant) {}
+
+    std::string op_desc(ggml_tensor *) override { return "FLASHRT_LAYERNORM"; }
+    bool run_whole_graph() override { return true; }
+    std::string vars() override { return VARS_TO_STR3(width, rows, variant); }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        // 1: strided rows; 2: norm has another consumer; 3: per-row affine;
+        // 4: unaligned channel vectors; 5: zero epsilon; 6: batched 3D input.
+        ggml_tensor * x = variant == 6
+            ? ggml_new_tensor_3d(ctx, GGML_TYPE_F32, width, rows, 2)
+            : ggml_new_tensor_2d(ctx, GGML_TYPE_F32, variant == 1 ? width * 2 : width, rows);
+        ggml_tensor * w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
+                                           variant == 4 ? width + 1 : width, variant == 3 ? rows : 1);
+        ggml_tensor * b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, width);
+        ggml_set_name(x, "flashrt_x");
+        ggml_set_name(w, "flashrt_w");
+        ggml_set_name(b, "flashrt_b");
+        if (variant == 1) {
+            x = ggml_view_2d(ctx, x, width, rows, x->nb[1], 0);
+        }
+        if (variant == 4) {
+            w = ggml_view_1d(ctx, w, width, sizeof(float));
+        }
+        ggml_tensor * n = ggml_norm(ctx, x, variant == 5 ? 0.0f : 1e-6f);
+        ggml_tensor * out = ggml_add(ctx, ggml_mul(ctx, n, w), b);
+        if (variant == 2) {
+            out = ggml_add(ctx, out, n);
+        }
+        ggml_set_name(out, "flashrt_test_out");
+        return out;
+    }
+};
+
+// Gemma's diamond needs whole-graph validation, including external consumers.
+struct test_flashrt_rmsnorm : public test_case {
+    const int64_t width;
+    const int64_t rows;
+    const int variant;
+    test_flashrt_rmsnorm(int64_t width, int64_t rows, int variant = 0)
+        : width(width), rows(rows), variant(variant) {}
+    std::string op_desc(ggml_tensor *) override { return "FLASHRT_RMSNORM"; }
+    bool run_whole_graph() override { return true; }
+    std::string vars() override { return VARS_TO_STR3(width, rows, variant); }
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * x = variant == 6
+            ? ggml_new_tensor_3d(ctx, GGML_TYPE_F32, width, rows, 2)
+            : ggml_new_tensor_2d(ctx, GGML_TYPE_F32, variant == 1 ? width * 2 : width, rows);
+        ggml_tensor * w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
+            variant == 4 ? width + 1 : width, variant == 3 ? rows : 1);
+        ggml_set_name(x, "flashrt_rms_x");
+        ggml_set_name(w, "flashrt_rms_w");
+        if (variant == 1) {
+            x = ggml_view_2d(ctx, x, width, rows, x->nb[1], 0);
+        }
+        if (variant == 4) {
+            w = ggml_view_1d(ctx, w, width, sizeof(float));
+        }
+        ggml_tensor * n = ggml_rms_norm(ctx, x, variant == 5 ? 0.0f : 1e-6f);
+        ggml_tensor * m = ggml_mul(ctx, n, w);
+        ggml_tensor * out = variant == 11 ? ggml_add(ctx, n, m)
+            : ggml_add(ctx, m, variant == 10 ? x : n);
+        if (variant == 2) { out = ggml_add(ctx, out, n); }
+        if (variant == 8) { out = ggml_add(ctx, out, m); }
+        if (variant == 7) { ggml_set_output(n); }
+        if (variant == 9) { ggml_set_output(m); }
+        ggml_set_name(out, "flashrt_rms_test_out");
+        return out;
+    }
+};
+
 // GGML_OP_RMS_NORM
 struct test_rms_norm : public test_case {
     const ggml_type type;
@@ -8441,6 +8519,28 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_l2_norm(GGML_TYPE_F32, { n, 5, 4, 3 }, eps, true));
             test_cases.emplace_back(new test_l2_norm(GGML_TYPE_F32, { n, 5, 4, 3 }, eps, false, true));
         }
+    }
+
+    // SM89 affine LayerNorm target shapes plus width/layout/consumer guards.
+    for (int64_t rows : { 1, 50, 256, 512 }) {
+        test_cases.emplace_back(new test_flashrt_layernorm(1152, rows));
+    }
+    for (int variant = 1; variant <= 6; ++variant) {
+        test_cases.emplace_back(new test_flashrt_layernorm(1152, 5, variant));
+    }
+    test_cases.emplace_back(new test_flashrt_layernorm(1025, 5));
+    test_cases.emplace_back(new test_flashrt_layernorm(8194, 5));
+
+    for (int64_t width : {1024, 2048}) {
+        for (int64_t rows : {1, 11, 50, 256}) {
+            test_cases.emplace_back(new test_flashrt_rmsnorm(width, rows));
+        }
+    }
+    for (int variant = 1; variant <= 11; ++variant) {
+        test_cases.emplace_back(new test_flashrt_rmsnorm(1024, 5, variant));
+    }
+    for (int64_t width : {1, 17, 1023, 1025, 8192, 8193}) {
+        test_cases.emplace_back(new test_flashrt_rmsnorm(width, 5));
     }
 
     // in-place tests

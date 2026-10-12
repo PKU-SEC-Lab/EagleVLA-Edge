@@ -2039,6 +2039,19 @@ static struct ggml_tensor * ggml_add_impl(
         struct ggml_tensor  * a,
         struct ggml_tensor  * b,
         bool                  inplace) {
+    if (!ggml_can_repeat(b, a)) {
+        const struct ggml_tensor * inputs[2] = { a, b };
+        for (int i = 0; i < 2; ++i) {
+            const struct ggml_tensor * t = inputs[i];
+            fprintf(stderr,
+                "[ADD_SHAPE] %c name=%s op=%s type=%s ne=[%lld,%lld,%lld,%lld] src0=%s\n",
+                i == 0 ? 'a' : 'b', t->name, ggml_op_name(t->op), ggml_type_name(t->type),
+                (long long) t->ne[0], (long long) t->ne[1],
+                (long long) t->ne[2], (long long) t->ne[3],
+                t->src[0] ? t->src[0]->name : "-");
+        }
+        fflush(stderr);
+    }
     GGML_ASSERT(ggml_can_repeat(b, a));
 
     struct ggml_tensor * result = inplace ? ggml_view_tensor(ctx, a) : ggml_dup_tensor(ctx, a);

@@ -9,6 +9,10 @@
 #include <memory>
 #include <mutex>
 
+#ifdef GGML_CUDA_FLASHRT
+struct ggml_cuda_flashrt_prefill_state;
+#endif
+
 #if defined(GGML_USE_HIP)
 #define GGML_COMMON_DECL_HIP
 #define GGML_COMMON_IMPL_HIP
@@ -1388,15 +1392,33 @@ struct ggml_cuda_stream_context {
     }
 };
 
+#ifdef GGML_CUDA_FLASHRT
+struct ggml_cuda_flashrt_gemm_state;
+#endif
+
 struct ggml_backend_cuda_context {
+#ifdef GGML_CUDA_FLASHRT
+    // Declared before cuda_graphs: reverse member destruction releases graphs
+    // before the coefficient allocation retained by captured RoPE kernels.
+    std::shared_ptr<void> flashrt_rope_state;
+#endif
+
     int device;
     std::string name;
     cudaEvent_t copy_event = nullptr;
+
+#ifdef GGML_CUDA_FLASHRT
+    std::shared_ptr<ggml_cuda_flashrt_prefill_state> flashrt_prefill_gemm_states[GGML_CUDA_MAX_STREAMS];
+#endif
 
     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
 
     int curr_stream_no = 0;
+
+#ifdef GGML_CUDA_FLASHRT
+    std::shared_ptr<ggml_cuda_flashrt_gemm_state> flashrt_gemm_states[GGML_CUDA_MAX_STREAMS];
+#endif
 
 #ifdef USE_CUDA_GRAPH
     // Map from first_node_ptr to cuda_graph - allows multiple graphs per context

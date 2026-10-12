@@ -2,6 +2,10 @@
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 
+#ifdef GGML_CUDA_FLASHRT
+#include "ggml-cuda/flashrt-prefill-gemm.cuh"
+#endif
+
 #include "ggml-cuda/allreduce.cuh"
 #include "ggml-cuda/common.cuh"
 #include "ggml-cuda/acc.cuh"
@@ -29,10 +33,18 @@
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
 #include "ggml-cuda/mmf.cuh"
+#ifdef GGML_CUDA_FLASHRT
+#include "ggml-cuda/flashrt-gemm.cuh"
+#include "ggml-cuda/flashrt-gemm-mma.cuh"
+#include "ggml-cuda/flashrt-bias-residual.cuh"
+#include "ggml-cuda/flashrt-bias-activation.cuh"
+#endif
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
 #include "ggml-cuda/norm.cuh"
+#include "ggml-cuda/flashrt-layernorm.cuh"
+#include "ggml-cuda/flashrt-rmsnorm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
 #include "ggml-cuda/opt-step-sgd.cuh"
 #include "ggml-cuda/out-prod.cuh"
@@ -40,6 +52,9 @@
 #include "ggml-cuda/pool2d.cuh"
 #include "ggml-cuda/quantize.cuh"
 #include "ggml-cuda/rope.cuh"
+#ifdef GGML_CUDA_FLASHRT
+#include "ggml-cuda/flashrt-rope.cuh"
+#endif
 #include "ggml-cuda/roll.cuh"
 #include "ggml-cuda/scale.cuh"
 #include "ggml-cuda/snake.cuh"
@@ -635,9 +650,21 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
     std::unique_lock<std::mutex> lock(ggml_cuda_lock);
     ggml_cuda_lock_cv.wait(lock, []{ return ggml_cuda_lock_counter.load(std::memory_order_relaxed) == 0; });
 
+#ifdef GGML_CUDA_FLASHRT
+    // Captured Lt nodes reference this context-owned workspace and scratch.
+    // Release under capture exclusion, before destroying any streams.
+    for (auto & state : flashrt_gemm_states) { state.reset(); }
+#endif
+
     if (copy_event != nullptr) {
         CUDA_CHECK(cudaEventDestroy(copy_event));
     }
+#ifdef GGML_CUDA_FLASHRT
+    // Release Lt plans and scratch under the capture exclusion lock, before streams.
+    for (auto & state : flashrt_prefill_gemm_states) {
+        state.reset();
+    }
+#endif
     for (int i = 0; i < GGML_CUDA_MAX_DEVICES; ++i) {
         for (int j = 0; j < GGML_CUDA_MAX_STREAMS; ++j) {
             if (streams[i][j] != nullptr) {
@@ -1729,6 +1756,11 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
 }
 
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+#ifdef GGML_CUDA_FLASHRT
+    if (ggml_cuda_flashrt_prefill_gemm(ctx, dst)) {
+        return;
+    }
+#endif
     GGML_TENSOR_BINARY_OP_LOCALS
 
     const int32_t hint = ggml_get_op_params_i32(dst, 1);
@@ -1756,6 +1788,11 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         return;
     }
     if (ggml_cuda_should_use_mmf(src0->type, cc, warp_size, src0->ne, src0->nb, ne11, /*mul_mat_id =*/ false)) {
+#ifdef GGML_CUDA_FLASHRT
+        if (ggml_cuda_flashrt_gemm(ctx, dst) || ggml_cuda_flashrt_gemm_mma(ctx, dst)) {
+            return;
+        }
+#endif
         ggml_cuda_mul_mat_f(ctx, src0, src1, nullptr, dst);
         return;
     }
@@ -3045,6 +3082,15 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
+#ifdef GGML_CUDA_FLASHRT
+    if (node->op == GGML_OP_NORM && ggml_cuda_flashrt_layernorm(*cuda_ctx, cgraph, i)) {
+        return 2;
+    }
+    if (node->op == GGML_OP_RMS_NORM && ggml_cuda_flashrt_rmsnorm(*cuda_ctx, cgraph, i)) {
+        return 2;
+    }
+#endif
+
     // gated_delta_net -> cpy: scatter recurrent-state snapshots into the cache
     if (node->op == GGML_OP_GATED_DELTA_NET) {
         ggml_cuda_gated_delta_net_fused_cache fused_state_cpy;
@@ -3181,6 +3227,24 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
             return 4;
         }
     }
+
+#ifdef GGML_CUDA_FLASHRT
+    if (node->op == GGML_OP_ADD) {
+        const int flashrt_skip = ggml_cuda_flashrt_bias_residual(*cuda_ctx, cgraph, i);
+        if (flashrt_skip != 0) {
+            return flashrt_skip;
+        }
+    }
+#endif
+
+#ifdef GGML_CUDA_FLASHRT
+    if (node->op == GGML_OP_ADD) {
+        const int activation_skip = ggml_cuda_flashrt_bias_activation(*cuda_ctx, cgraph, i);
+        if (activation_skip != 0) {
+            return activation_skip;
+        }
+    }
+#endif
 
     // multi-(add or mul)
     if (node->op == GGML_OP_ADD || node->op == GGML_OP_MUL) {
@@ -3959,6 +4023,36 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
         }
         // Launch graph
         CUDA_CHECK(cudaGraphLaunch(graph->instance, cuda_ctx->stream()));
+#ifdef GGML_CUDA_FLASHRT
+        static const bool gemm_graph_trace = [] {
+            const char * value = std::getenv("GGML_CUDA_FLASHRT_GEMM_GRAPH_TRACE");
+            return value && strcmp(value, "1") == 0;
+        }();
+        static const bool activation_graph_trace = [] {
+            const char * value = std::getenv("GGML_CUDA_FLASHRT_ACTIVATION_GRAPH_TRACE");
+            return value && strcmp(value, "1") == 0;
+        }();
+        if (activation_graph_trace && cgraph->n_nodes > 0 &&
+            strncmp(cgraph->nodes[0]->name, "activation_test_", 16) == 0) {
+            GGML_LOG_INFO("flashrt_activation_graph: launch node=%s\n", cgraph->nodes[0]->name);
+        }
+        static const bool bias_graph_trace = [] {
+            const char * value = std::getenv("GGML_CUDA_FLASHRT_BIAS_GRAPH_TRACE");
+            return value && strcmp(value, "1") == 0;
+        }();
+        if (bias_graph_trace && cgraph->n_nodes > 0 &&
+            strncmp(cgraph->nodes[0]->name, "bias_test_", 10) == 0) {
+            GGML_LOG_INFO("flashrt_bias_graph: launch node=%s\n", cgraph->nodes[0]->name);
+        }
+        if (gemm_graph_trace && cgraph->n_nodes == 1) {
+            const ggml_tensor * node = cgraph->nodes[0];
+            if (node->op == GGML_OP_MUL_MAT && node->src[0] && node->src[1]) {
+                GGML_LOG_INFO("flashrt_gemm_graph: launch node=%s M=%lld N=%lld K=%lld\n",
+                    node->name, (long long) node->src[1]->ne[1],
+                    (long long) node->src[0]->ne[1], (long long) node->src[0]->ne[0]);
+            }
+        }
+#endif
 #else
         GGML_UNUSED(graph_key);
         graph_evaluated_or_captured = true;
@@ -5216,6 +5310,11 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
         GGML_LOG_ERROR("%s: failed to allocate context\n", __func__);
         return nullptr;
     }
+
+#ifdef GGML_CUDA_FLASHRT
+    // Prepare persistent RoPE coefficients before this backend can capture a graph.
+    ggml_cuda_flashrt_rope_init(*ctx);
+#endif
 
     ggml_backend_t cuda_backend = new ggml_backend {
         /* .guid    = */ ggml_backend_cuda_guid(),

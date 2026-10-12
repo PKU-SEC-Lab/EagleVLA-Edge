@@ -1583,11 +1583,9 @@ void llama_context::pi0_refresh_encoded_kv_gpu(const std::vector<ggml_tensor *> 
         (int) pi0_enc_kv_gpu.tensors.size() != n_layer;
 
     if (need_realloc) {
-        if (!pi0_enc_kv_gpu.tensors.empty()) {
-            ggml_backend_sched_reset(sched.get());
-            gf_res_prev->reset();
-        }
-
+        // src aliases the current encoder graph. Keep that graph and its
+        // scheduler allocation alive until every KV tensor has been copied.
+        // process_ubatch rebuilds it when switching back to the decoder.
         pi0_enc_kv_gpu.ctx.reset();
         pi0_enc_kv_gpu.buf.reset();
         pi0_enc_kv_gpu.tensors.clear();

@@ -1,5 +1,9 @@
 #include "im2col.cuh"
 
+#ifdef GGML_CUDA_FLASHRT
+#include "flashrt-patch-im2col.cuh"
+#endif
+
 #define MAX_GRIDDIM_Y 65535
 #define MAX_GRIDDIM_Z 65535
 
@@ -76,6 +80,11 @@ static void im2col_cuda_f32(const float * x, float * dst,
 }
 
 void ggml_cuda_op_im2col(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+#ifdef GGML_CUDA_FLASHRT
+    if (ggml_cuda_flashrt_patch_im2col(ctx, dst)) {
+        return;
+    }
+#endif
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
     const float * src1_d = (const float *)src1->data;

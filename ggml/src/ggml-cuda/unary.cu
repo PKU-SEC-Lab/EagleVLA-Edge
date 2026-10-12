@@ -1,5 +1,8 @@
 #include "unary.cuh"
 #include "convert.cuh"
+#ifdef GGML_CUDA_FLASHRT
+#include "flashrt-geglu.cuh"
+#endif
 
 static __device__ __forceinline__ float op_abs(float x) {
     return fabsf(x);
@@ -342,6 +345,11 @@ void ggml_cuda_op_reglu(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 }
 
 void ggml_cuda_op_geglu(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+#ifdef GGML_CUDA_FLASHRT
+    if (ggml_cuda_flashrt_geglu(ctx, dst)) {
+        return;
+    }
+#endif
     ggml_cuda_op_unary_gated<op_gelu>(ctx, dst);
 }
 

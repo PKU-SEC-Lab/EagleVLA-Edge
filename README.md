@@ -290,11 +290,67 @@ normalized action in `action_final` with `action_steps` and `action_dim`. Image 
 order must match the checkpoint's camera/time convention. The managed Python foreground
 client and FlashRT provider do not yet dispatch GR00T models.
 
-## Python Foreground API
+## Python API
 
-The Python foreground client can start `llama-server`, wait for the model to become ready, submit images and state through the persistent `/foreground/*` session, and return the action as a NumPy array.
+### Default: in-process NumPy API
 
-### Build llama-server
+For direct Python control, use the in-process `jetson_pi` NumPy API. It calls
+the EagleVLA-Edge PI0/PI0.5 C++ runtime directly, keeps the model and compatible
+compute graphs alive in one `PIModel` object, and does **not** start
+`llama-server` or route inference through FlashRT.
+
+Install the two Python build dependencies and build the optional pybind11 module:
+
+```bash
+python3 -m pip install numpy pybind11
+
+cmake -S . -B build-python \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DGGML_CUDA=ON \
+  -DJETSON_PI_BUILD_PYTHON=ON \
+  -DLLAMA_BUILD_TOOLS=OFF \
+  -DLLAMA_BUILD_TESTS=OFF \
+  -DLLAMA_BUILD_EXAMPLES=OFF \
+  -DLLAMA_BUILD_SERVER=OFF
+
+cmake --build build-python --target jetson_pi -j
+export PYTHONPATH="$PWD/build-python/bin${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+```python
+import numpy as np
+import jetson_pi
+
+model = jetson_pi.load_model(
+    model_path="/path/to/pi05.gguf",
+    mmproj_path="/path/to/mmproj.gguf",
+    backend="cuda",
+    n_views=2,
+    image_height=224,
+    image_width=224,
+)
+
+images = np.empty((2, 224, 224, 3), dtype=np.uint8)
+state = np.zeros(32, dtype=np.float32)
+actions = model.predict(images, "/do something", state)
+print(actions.shape)  # (action_steps, action_dim)
+
+# Reuse `model` for subsequent control ticks, then release it explicitly.
+model.close()
+```
+
+`images` must be a C-contiguous `uint8` NHWC array. See the complete
+[in-process NumPy API reference](docs/python_api.md) for array requirements,
+lifetime rules, and context-manager usage.
+
+### Alternative: persistent foreground server API
+
+Use this path when another process must communicate with a persistent
+`llama-server` over HTTP. The Python foreground client starts the server, waits
+for it to become ready, submits images and state through `/foreground/*`, and
+returns the action as a NumPy array.
+
+#### Build llama-server
 
 ```bash
 cmake -S . -B build-graph \
@@ -313,7 +369,7 @@ python3 -m pip install numpy
 export PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-### Start and call the server from Python
+#### Start and call the server from Python
 
 ```python
 import numpy as np
@@ -452,6 +508,7 @@ Latency is measured in milliseconds. The following values are P50 model-side lat
 |---|---|
 | [Model Preparation](docs/model_conversion.md) | Download, split, and convert PI checkpoints to GGUF. |
 | [GR00T Validation and Conversion](tools/gr00t-reference/README.md) | Convert GR00T N1.7 to GGUF and run reference and regression utilities. |
+| [In-process NumPy API](docs/python_api.md) | Direct pybind11 PI0/PI0.5 inference without a server or FlashRT. |
 | [Foreground Server API](docs/foreground_server_usage.md) | Session lifecycle, endpoints, response fields, and operational notes. |
 | [ViT Optimization](latency_optimize_docs/pi0_vit_optimization.md) | Vision graph reuse and input-layout optimization. |
 | [Decode Graph Reuse](latency_optimize_docs/pi0_decode_graph_reuse.md) | Action-expert graph reuse implementation. |

@@ -1613,14 +1613,27 @@ void llama_context::pi0_refresh_encoded_kv_gpu(const std::vector<ggml_tensor *> 
 
     if (need_realloc) {
         if (!pi0_enc_kv_gpu.tensors.empty()) {
-            ggml_backend_sched_reset(sched.get());
-            gf_res_prev->reset();
+            // The encoder's current result owns `src`.  Resetting sched or
+            // gf_res_prev here invalidates that result before it is copied,
+            // and can even clear the vector referenced by `src` itself.
+            // Invalidate only the separate persistent decoder, which may
+            // still contain views of the old GPU KV/action/time allocation.
+            if (sched_pi_decoder && gf_res_pi_decoder) {
+                ggml_backend_sched_synchronize(sched_pi_decoder.get());
+                gf_res_pi_decoder->reset();
+                ggml_backend_sched_reset(sched_pi_decoder.get());
+            }
         }
 
+        cross.encoded_kv_gpu.clear();
+        cross.pi0_action_gpu = nullptr;
+        cross.pi0_time_gpu = nullptr;
+        cross.pi0_use_gpu_kv = false;
         pi0_enc_kv_gpu.ctx.reset();
         pi0_enc_kv_gpu.buf.reset();
         pi0_enc_kv_gpu.tensors.clear();
         pi0_enc_kv_gpu.action = nullptr;
+        pi0_enc_kv_gpu.time = nullptr;
 
         ggml_init_params params = {
             /*.mem_size   =*/ size_t(n_layer + 2) * ggml_tensor_overhead(),

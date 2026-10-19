@@ -152,6 +152,8 @@ Convert a PI0 or PI0.5 checkpoint by following [Model Preparation](https://githu
 
 ```bash
 PI_MODEL=auto \
+PI0_PERSISTENT_CUDA_GRAPH=1 \
+PI0_DECODE_UNROLL=10 \
 ./build/bin/llama-server \
   -m /path/to/pi_llm.gguf \
   --mmproj /path/to/mmproj.gguf \
@@ -161,12 +163,20 @@ PI_MODEL=auto \
 ```
 
 Use `PI_MODEL=pi0` or `PI_MODEL=pi05` to force a model path.
+For PI0.5, the persistent CUDA graph keeps the complete diffusion trajectory
+in one replay and automatically unrolls all diffusion steps. `PI0_DECODE_UNROLL=10`
+also enables up to ten steps per graph on the non-persistent PI path; it is
+capped at the model's configured number of steps. The persistent trajectory
+is PI0.5-specific and requires the CUDA backend. These settings do not affect
+GR00T.
 
 **RTX 4090 (single GPU):**
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 PI_MODEL=auto \
+PI0_PERSISTENT_CUDA_GRAPH=1 \
+PI0_DECODE_UNROLL=10 \
 ./build/bin/llama-server \
   -m /path/to/pi_llm.gguf \
   --mmproj /path/to/mmproj.gguf \

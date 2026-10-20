@@ -202,11 +202,23 @@ llm_build_pi0_ae::llm_build_pi0_ae(const llama_model & model, const llm_graph_pa
     ggml_tensor * rope_ff = is_pi05 ? build_inp_rope_freq_factors_pi0() : nullptr;
     auto * inp_attn_ae = build_attn_inp_no_cache_ae(suffix_len, cross_kv_tensors[0]->ne[2] + suffix_len);
 
+    int modulation_step = 0;
     auto build_pi05_modulation = [&](ggml_tensor * cond, ggml_tensor * dense_w, ggml_tensor * dense_b, int il, const char * tag) -> std::array<ggml_tensor *, 3> {
         GGML_ASSERT(cond != nullptr);
         GGML_ASSERT(dense_w != nullptr);
 
-        ggml_tensor * modulation = pi05_dense(dense_w, dense_b, cond);
+        ggml_tensor * modulation;
+        if (cross && cross->pi05_modulation_gpu && !keep_debug) {
+            auto table = cross->pi05_modulation_gpu;
+            const int slot = il < 0 ? int(table->ne[1]) - 1 :
+                2 * (il - n_layer / 2) + (std::strcmp(tag, "pi05_ffn_mod") == 0);
+            GGML_ASSERT(modulation_step >= 0 && modulation_step < table->ne[2]);
+            modulation = ggml_view_2d(ctx0, table, table->ne[0], 1, table->nb[1],
+                modulation_step * table->nb[2] + slot * table->nb[1]);
+            set_tensor_backend_from_buffer(modulation, table);
+        } else {
+            modulation = pi05_dense(dense_w, dense_b, cond);
+        }
 
         const int64_t dim = modulation->ne[0] / 3;
         GGML_ASSERT(modulation->ne[0] == 3 * dim);
@@ -265,6 +277,7 @@ llm_build_pi0_ae::llm_build_pi0_ae(const llama_model & model, const llm_graph_pa
     auto run_ae_stack = [&](ggml_tensor * actions_in, ggml_tensor * adarms_cond_in) -> ggml_tensor * {
         bool dbg_this = keep_debug && (ae_call_count == 0);
         ae_call_count++;
+        modulation_step = (cross ? cross->pi0_decode_step : 0) + ae_call_count - 1;
 
         if (dbg_this) {
             mark_debug(actions_in, "pi05_dbg_ae_input", -1);

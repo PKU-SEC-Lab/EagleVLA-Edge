@@ -135,9 +135,12 @@ cmake --build build --target llama-server -j
 NVIDIA Jetson or another CUDA-capable target:
 
 ```bash
-cmake -S . -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DGGML_CUDA=ON -DGGML_CUDA_GRAPHS=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target llama-server -j
 ```
+
+For an explicit CUDA target, add `-DCMAKE_CUDA_ARCHITECTURES=89` for RTX 4090,
+`87` for Orin, or `110` for Thor (with a compatible CUDA toolkit).
 
 ### 2. Prepare the model
 
@@ -150,19 +153,31 @@ Convert a PI0 or PI0.5 checkpoint by following [Model Preparation](https://githu
 
 ### 3. Start the foreground server
 
+The default CUDA configuration below targets a matching **PI0.5 FP16** model
+and projector, with persistent graphs, GPU prefix KV reuse, unroll, shared
+FP16 activation casts, and cached time modulation enabled. Keep the same
+server alive across control ticks.
+
 ```bash
-PI_MODEL=auto \
+CUDA_VISIBLE_DEVICES=0 \
+PI_MODEL=pi05 \
 PI0_PERSISTENT_CUDA_GRAPH=1 \
 PI0_DECODE_UNROLL=10 \
+PI05_FP16_SHARED_CAST=1 \
+PI05_CACHE_TIME_MODULATION=1 \
 ./build/bin/llama-server \
-  -m /path/to/pi_llm.gguf \
-  --mmproj /path/to/mmproj.gguf \
+  -m /path/to/pi05-base-F16-10-action.gguf \
+  --mmproj /path/to/mmproj-model-f16.gguf \
   -ngl 99 \
-  --host 0.0.0.0 \
-  --port 8080
+  --chat-template vicuna \
+  --host 127.0.0.1 \
+  --port 8080 \
+  -np 1 \
+  -c 131072 \
+  -t 8 \
+  -tb 8
 ```
 
-Use `PI_MODEL=pi0` or `PI_MODEL=pi05` to force a model path.
 For PI0.5, the persistent CUDA graph keeps the complete diffusion trajectory
 in one replay and automatically unrolls all diffusion steps. `PI0_DECODE_UNROLL=10`
 also enables up to ten steps per graph on the non-persistent PI path; it is
@@ -170,21 +185,38 @@ capped at the model's configured number of steps. The persistent trajectory
 is PI0.5-specific and requires the CUDA backend. These settings do not affect
 GR00T.
 
+`PI05_FP16_SHARED_CAST=1` shares otherwise repeated activation conversions.
+`PI05_CACHE_TIME_MODULATION=1` computes the fixed diffusion-time modulation
+projections once per model context (about 4.34 MiB for the tested model).
+This cache contains no image, instruction, state, noise or action data;
+new observations still run the normal encoder and action computation. Keep
+the loaded weights and diffusion schedule fixed; LoRA and binary-debug paths
+bypass this cache. The two new flags are opt-in in the runtime and enabled
+explicitly by these examples. Unset them for an unoptimized comparison.
+
+For PI0, use its matching model/projector, set `PI_MODEL=pi0` and
+`PI0_PERSISTENT_CUDA_GRAPH=0`, and omit both `PI05_*` flags. PI0 can still use
+ordinary graph reuse, GPU prefix KV, and `PI0_DECODE_UNROLL=10`. For CPU-only
+inference, omit the CUDA optimization flags and use `-ngl 0`.
+
 **RTX 4090 (single GPU):**
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-PI_MODEL=auto \
+PI_MODEL=pi05 \
 PI0_PERSISTENT_CUDA_GRAPH=1 \
 PI0_DECODE_UNROLL=10 \
+PI05_FP16_SHARED_CAST=1 \
+PI05_CACHE_TIME_MODULATION=1 \
 ./build/bin/llama-server \
-  -m /path/to/pi_llm.gguf \
-  --mmproj /path/to/mmproj.gguf \
-  -ngl 37 \
+  -m /path/to/pi05-base-F16-10-action.gguf \
+  --mmproj /path/to/mmproj-model-f16.gguf \
+  -ngl 99 \
   --chat-template vicuna \
   --host 127.0.0.1 \
   --port 8080 \
   -np 1 \
+  -c 131072 \
   -t 8 \
   -tb 8
 ```
@@ -317,6 +349,7 @@ python3 -m pip install numpy pybind11
 cmake -S . -B build-python \
   -DCMAKE_BUILD_TYPE=Release \
   -DGGML_CUDA=ON \
+  -DGGML_CUDA_GRAPHS=ON \
   -DJETSON_PI_BUILD_PYTHON=ON \
   -DLLAMA_BUILD_TOOLS=OFF \
   -DLLAMA_BUILD_TESTS=OFF \
@@ -328,16 +361,27 @@ export PYTHONPATH="$PWD/build-python/bin${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
 ```python
+import os
+
+# Set before importing/loading the native CUDA runtime.
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["PI_MODEL"] = "pi05"
+os.environ["PI0_PERSISTENT_CUDA_GRAPH"] = "1"
+os.environ["PI0_DECODE_UNROLL"] = "10"
+os.environ["PI05_FP16_SHARED_CAST"] = "1"
+os.environ["PI05_CACHE_TIME_MODULATION"] = "1"
+
 import numpy as np
 import jetson_pi
 
 model = jetson_pi.load_model(
-    model_path="/path/to/pi05.gguf",
-    mmproj_path="/path/to/mmproj.gguf",
+    model_path="/path/to/pi05-base-F16-10-action.gguf",
+    mmproj_path="/path/to/mmproj-model-f16.gguf",
     backend="cuda",
     n_views=2,
     image_height=224,
     image_width=224,
+    n_threads=8,
 )
 
 images = np.empty((2, 224, 224, 3), dtype=np.uint8)
@@ -353,6 +397,13 @@ model.close()
 [in-process NumPy API reference](docs/python_api.md) for array requirements,
 lifetime rules, and context-manager usage.
 
+This is the same optimized CUDA configuration used on RTX 4090, Orin and
+Thor. Keep one `model` instance alive; each `predict()` refreshes the request
+inputs while retaining compatible graphs and immutable time modulation.
+No fixed noise file is required for normal use. For a PI0 model, use
+`PI_MODEL=pi0`, disable the PI0.5 persistent trajectory flag and omit the
+two `PI05_*` flags as described in Quick Start.
+
 ### Alternative: persistent foreground server API
 
 Use this path when another process must communicate with a persistent
@@ -366,7 +417,7 @@ returns the action as a NumPy array.
 cmake -S . -B build-graph \
   -DCMAKE_BUILD_TYPE=Release \
   -DGGML_CUDA=ON \
-  -DCMAKE_CUDA_ARCHITECTURES=89 \
+  -DGGML_CUDA_GRAPHS=ON \
   -DLLAMA_BUILD_SERVER=ON
 
 cmake --build build-graph --target llama-server -j8
@@ -382,13 +433,24 @@ export PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
 #### Start and call the server from Python
 
 ```python
+import os
+
+# The child server inherits this optimized PI0.5 configuration.
+os.environ["PI_MODEL"] = "pi05"
+os.environ["PI0_PERSISTENT_CUDA_GRAPH"] = "1"
+os.environ["PI0_DECODE_UNROLL"] = "10"
+os.environ["PI05_FP16_SHARED_CAST"] = "1"
+os.environ["PI05_CACHE_TIME_MODULATION"] = "1"
+os.environ["LLAMA_ARG_THREADS"] = "8"
+os.environ["LLAMA_ARG_CTX_SIZE"] = "131072"
+
 import numpy as np
 
 from jetson_pi_foreground import ManagedForegroundSession
 
 SERVER_PATH = "/path/to/EagleVLA-Edge/build-graph/bin/llama-server"
-MODEL_PATH = "/path/to/pi0-model.gguf"
-MMPROJ_PATH = "/path/to/mmproj-model.gguf"
+MODEL_PATH = "/path/to/pi05-base-F16-10-action.gguf"
+MMPROJ_PATH = "/path/to/mmproj-model-f16.gguf"
 IMAGE_PATH = "/path/to/test-224.jpg"
 
 state = np.asarray([
@@ -402,8 +464,10 @@ session = ManagedForegroundSession(
     model_path=MODEL_PATH,
     mmproj_path=MMPROJ_PATH,
     gpu=0,
+    n_gpu_layers=99,
     port=8080,
     timeout=300,
+    keep_alive=True,
 )
 
 try:

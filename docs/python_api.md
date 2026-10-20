@@ -21,6 +21,11 @@ action, metadata = session.predict(
 )
 ```
 
+For connection reuse, pass `keep_alive=True` to `ForegroundSession` or
+`ManagedForegroundSession` and call `close()` when finished. This is optional
+and disabled by default. Failed transport requests are not automatically
+replayed, since the server may already have executed them.
+
 `ManagedForegroundSession` can start and stop llama-server for a standalone
 Python process. Use it as a context manager so the child server is always
 closed:
@@ -56,6 +61,9 @@ Configure and build the optional module:
 
 ```bash
 cmake -S . -B build-python \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DGGML_CUDA=ON \
+  -DGGML_CUDA_GRAPHS=ON \
   -DJETSON_PI_BUILD_PYTHON=ON \
   -DLLAMA_BUILD_TOOLS=OFF \
   -DLLAMA_BUILD_TESTS=OFF \
@@ -74,20 +82,46 @@ PYTHONPATH=build-python/bin python3 -c "import jetson_pi; print(jetson_pi.__doc_
 
 The Python module is disabled by default and does not add Python or pybind11
 to the normal C++ build.
+For a CPU-only build, omit `-DGGML_CUDA=ON` and `-DGGML_CUDA_GRAPHS=ON`,
+then select `backend="cpu"` without the CUDA runtime flags below.
 
 ## Usage
+
+For the recommended **CUDA PI0.5 FP16** configuration, set these variables
+before importing/loading the native runtime:
+
+```python
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["PI_MODEL"] = "pi05"
+os.environ["PI0_PERSISTENT_CUDA_GRAPH"] = "1"
+os.environ["PI0_DECODE_UNROLL"] = "10"
+os.environ["PI05_FP16_SHARED_CAST"] = "1"
+os.environ["PI05_CACHE_TIME_MODULATION"] = "1"
+```
+
+Use matching FP16 main/projector GGUFs and `n_threads=8` as in the
+[README default example](../README.md#default-in-process-numpy-api).
+The time-modulation cache depends only on fixed model weights and the
+diffusion schedule, not images, instructions, state or noise. Reuse one model
+instance with fixed weights/schedule; new request inputs are still refreshed.
+The two new flags are opt-in, and LoRA/binary-debug paths bypass that cache.
+For PI0, set `PI_MODEL=pi0`, use its matching model/projector, disable
+`PI0_PERSISTENT_CUDA_GRAPH` and omit the `PI05_*` flags. CPU-only inference
+should omit these CUDA optimization flags.
 
 ```python
 import numpy as np
 import jetson_pi
 
 model = jetson_pi.load_model(
-    model_path="/path/to/pi0.gguf",
+    model_path="/path/to/pi05-base-F16-10-action.gguf",
     mmproj_path="/path/to/vit.gguf",
     backend="cuda",
     n_views=2,
     image_height=224,
     image_width=224,
+    n_threads=8,
 )
 
 images = np.empty((2, 224, 224, 3), dtype=np.uint8)

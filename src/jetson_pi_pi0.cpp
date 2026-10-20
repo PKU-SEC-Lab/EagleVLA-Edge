@@ -467,6 +467,11 @@ int32_t jetson_pi_pi0_context(jetson_pi_pi0 * handle,
     }
     e->action_cache.assign(pi0_result.action_final_data,
                            pi0_result.action_final_data + need_elems);
+    const char * timing = std::getenv("JETSON_PI_API_TIMING");
+    if (timing && std::atoi(timing) != 0) {
+        std::fprintf(stderr, "[jetson-pi-api-timing] vit_ms=%.6f encode_ms=%.6f decode_ms=%.6f\n",
+            pi0_result.vit_ms, pi0_result.encode_ms, pi0_result.decode_ms);
+    }
     mtmd_pi0_result_free(&pi0_result);
     return JETSON_PI_PI0_OK;
 }

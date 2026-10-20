@@ -1560,6 +1560,73 @@ bool llama_context::set_adapter_cvec(
     return res;
 }
 
+void llama_context::pi05_prepare_modulation_cache() {
+    const char * enabled = std::getenv("PI05_CACHE_TIME_MODULATION");
+    if (!enabled || std::atoi(enabled) == 0 || !loras->empty() || pi05_debug_binary_enabled()) {
+        cross.pi05_modulation_gpu = nullptr;
+        return;
+    }
+    // These projections depend only on the immutable weights and the fixed
+    // diffusion time table, never on images, prompt, state or action noise.
+    if (cross.pi05_modulation_gpu) return;
+    GGML_ASSERT(cross.pi0_time_gpu && model.time_mlp_in && model.time_mlp_out);
+    const auto & hp = model.hparams;
+    const int first = hp.n_layer() / 2;
+    const int slots = 2 * (hp.n_layer() - first) + 1;
+    const int width = 3 * hp.n_embd_ae;
+    ggml_backend_t backend = nullptr;
+    auto buft = ggml_backend_buffer_get_type(cross.pi0_time_gpu->buffer);
+    for (auto b : backend_ptrs) {
+        if (ggml_backend_get_default_buffer_type(b) == buft) { backend = b; break; }
+    }
+    GGML_ASSERT(backend);
+    ggml_init_params params = { ggml_tensor_overhead() * 2, nullptr, true };
+    pi05_modulation_ctx.reset(ggml_init(params));
+    auto table = ggml_new_tensor_3d(pi05_modulation_ctx.get(), GGML_TYPE_F32, width, slots, hp.inference_steps);
+    ggml_set_name(table, "pi05_immutable_time_modulation");
+    pi05_modulation_buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(pi05_modulation_ctx.get(), buft));
+    GGML_ASSERT(pi05_modulation_buf);
+
+    params.mem_size = ggml_tensor_overhead() * 12000 + ggml_graph_overhead_custom(12000, false);
+    ggml_context_ptr ctx(ggml_init(params));
+    auto graph = ggml_new_graph_custom(ctx.get(), 12000, false);
+    auto dense = [&](ggml_tensor * w, ggml_tensor * bias, ggml_tensor * x) {
+        auto y = ggml_mul_mat(ctx.get(), w, x);
+        return bias ? ggml_add(ctx.get(), y, bias) : y;
+    };
+    for (uint32_t step = 0; step < hp.inference_steps; ++step) {
+        auto time = ggml_view_2d(ctx.get(), cross.pi0_time_gpu, hp.n_embd_ae, 1,
+            cross.pi0_time_gpu->nb[1], step * cross.pi0_time_gpu->nb[2]);
+        auto cond = dense(model.time_mlp_in, model.time_mlp_in_b, time);
+        cond = ggml_silu(ctx.get(), cond);
+        cond = dense(model.time_mlp_out, model.time_mlp_out_b, cond);
+        cond = ggml_silu(ctx.get(), cond);
+        auto store = [&](ggml_tensor * w, ggml_tensor * bias, int slot) {
+            auto value = dense(w, bias, cond);
+            auto destination = ggml_view_2d(ctx.get(), table, width, 1, table->nb[1],
+                step * table->nb[2] + slot * table->nb[1]);
+            ggml_build_forward_expand(graph, ggml_cpy(ctx.get(), value, destination));
+        };
+        for (uint32_t layer = first; layer < hp.n_layer(); ++layer) {
+            const auto & l = model.layers[layer];
+            store(l.attn_norm_dense, l.attn_norm_dense_b, 2 * (layer - first));
+            store(l.ffn_norm_dense, l.ffn_norm_dense_b, 2 * (layer - first) + 1);
+        }
+        store(model.ae_output_norm_dense, model.ae_output_norm_dense_b, slots - 1);
+    }
+    ggml_backend_buffer_ptr work(ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft));
+    GGML_ASSERT(work);
+    GGML_ASSERT(ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS);
+    ggml_backend_synchronize(backend);
+    if (sched_pi_decoder && gf_res_pi_decoder) {
+        ggml_backend_sched_synchronize(sched_pi_decoder.get());
+        gf_res_pi_decoder->reset();
+        ggml_backend_sched_reset(sched_pi_decoder.get());
+    }
+    cross.pi05_modulation_gpu = table;
+    LLAMA_LOG_INFO("PI0.5: cached immutable time modulation (%zu bytes)\n", ggml_nbytes(table));
+}
+
 void llama_context::pi0_clear_cross_kv() {
     pi0_enc_kv_gpu.ctx.reset();
     pi0_enc_kv_gpu.buf.reset();
@@ -2471,6 +2538,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
             // Upload it once so every unrolled step is a direct device view and
             // the scheduler can keep all ten steps in one CUDA graph split.
             ggml_backend_tensor_set(cross.pi0_time_gpu, cross.ae_time_embeddings.data(), 0, time_nbytes);
+            pi05_prepare_modulation_cache();
         }
 
         cross.pi0_cross_kv_inputs_ready  = false;

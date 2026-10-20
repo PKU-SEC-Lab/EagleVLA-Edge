@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import subprocess
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -23,13 +25,48 @@ class ForegroundSession:
         base_url: str = "http://127.0.0.1:8080",
         timeout: float = 300.0,
         compact: bool = True,
+        keep_alive: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.compact = compact
         self._state_dim = 0
+        self.keep_alive = keep_alive
+        self._connection = None
+
+    def close(self) -> None:
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            connection.close()
+            self._connection = None
+
+    def _request_keepalive(self, method, path, body):
+        endpoint = urlsplit(self.base_url)
+        if endpoint.scheme not in ("http", "https") or not endpoint.hostname:
+            raise ValueError("keep-alive requires an HTTP(S) base URL")
+        if self._connection is None:
+            cls = http.client.HTTPSConnection if endpoint.scheme == "https" else http.client.HTTPConnection
+            self._connection = cls(endpoint.hostname, endpoint.port, timeout=self.timeout)
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        try:
+            self._connection.request(method, endpoint.path.rstrip("/") + path,
+                                     body=data, headers={"Content-Type": "application/json"})
+            response = self._connection.getresponse()
+            payload = response.read()
+        except (OSError, http.client.HTTPException) as error:
+            self.close()
+            # Never replay a possibly executed inference request silently.
+            raise RuntimeError(f"foreground keep-alive request failed: {error}") from error
+        if response.status >= 400:
+            raise RuntimeError(f"foreground request failed ({response.status}): {payload.decode('utf-8', errors='replace')}")
+        result = json.loads(payload)
+        if isinstance(result, dict) and "error" in result:
+            raise RuntimeError(f"foreground server error: {result['error']}")
+        return result
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        if self.keep_alive:
+            return self._request_keepalive(method, path, body)
         data = None if body is None else json.dumps(body).encode("utf-8")
         request = Request(
             self.base_url + path,
@@ -112,8 +149,9 @@ class ManagedForegroundSession(ForegroundSession):
         timeout: float = 300.0,
         compact: bool = True,
         log_path: str | None = None,
+        keep_alive: bool = False,
     ):
-        super().__init__(f"http://{host}:{port}", timeout, compact=compact)
+        super().__init__(f"http://{host}:{port}", timeout, compact=compact, keep_alive=keep_alive)
         for name, path in (
             ("server", server_path),
             ("model", model_path),
@@ -162,6 +200,7 @@ class ManagedForegroundSession(ForegroundSession):
         raise TimeoutError(f"llama-server did not become ready within {timeout:g} seconds")
 
     def close(self) -> None:
+        super().close()
         process = getattr(self, "_process", None)
         if process is not None and process.poll() is None:
             process.terminate()

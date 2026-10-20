@@ -1,5 +1,6 @@
 #include "models.h"
 #include "pi-model.h"
+#include <cstdlib>
 
 ggml_tensor * clip_graph_siglip::build_vit_pi0_legacy(ggml_tensor * inp) {
     // Jetson-PI evaluates one camera at a time and keeps the ViT activations
@@ -74,6 +75,8 @@ ggml_tensor * clip_graph_siglip::build_vit_pi0_legacy(ggml_tensor * inp) {
 
 ggml_tensor * clip_graph_siglip::build_vit_pi05_legacy(ggml_tensor * inp) {
     ggml_tensor * inpL = inp;
+    const char * shared_cast = std::getenv("PI05_FP16_SHARED_CAST");
+    const bool share_fp16 = shared_cast && std::atoi(shared_cast) != 0;
 
     for (int il = 0; il < n_layer; ++il) {
         const clip_layer & layer = model.layers[il];
@@ -86,10 +89,11 @@ ggml_tensor * clip_graph_siglip::build_vit_pi05_legacy(ggml_tensor * inp) {
         // materialize that conversion once instead of inside all three GEMMs.
         ggml_tensor * qkv_in = cur;
         if (cur->type == GGML_TYPE_F32 &&
-                layer.q_w->type == GGML_TYPE_BF16 &&
-                layer.k_w->type == GGML_TYPE_BF16 &&
-                layer.v_w->type == GGML_TYPE_BF16) {
-            qkv_in = ggml_cast(ctx0, cur, GGML_TYPE_BF16);
+                (layer.q_w->type == GGML_TYPE_BF16 ||
+                 (share_fp16 && layer.q_w->type == GGML_TYPE_F16)) &&
+                layer.k_w->type == layer.q_w->type &&
+                layer.v_w->type == layer.q_w->type) {
+            qkv_in = ggml_cast(ctx0, cur, layer.q_w->type);
         }
         ggml_tensor * Qcur = build_mm(layer.q_w, qkv_in);
         ggml_tensor * Kcur = build_mm(layer.k_w, qkv_in);

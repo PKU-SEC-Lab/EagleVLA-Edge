@@ -288,6 +288,7 @@ private:
 
     void pi0_clear_cross_kv();
     void pi0_refresh_encoded_kv_gpu(const std::vector<ggml_tensor *> & src, int n_layer);
+    void pi05_prepare_modulation_cache();
 
     // TODO: read/write lora adapters and cvec
     size_t state_write_data(llama_io_write_i & io);
@@ -402,6 +403,8 @@ private:
     };
 
     pi0_encoded_kv_gpu_storage pi0_enc_kv_gpu;
+    ggml_context_ptr pi05_modulation_ctx;
+    ggml_backend_buffer_ptr pi05_modulation_buf;
 
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;

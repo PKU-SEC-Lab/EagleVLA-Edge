@@ -105,6 +105,7 @@ struct llama_cross {
     std::vector<ggml_tensor *> encoded_kv_gpu;
     ggml_tensor *                 pi0_action_gpu            = nullptr;
     ggml_tensor *                 pi0_time_gpu              = nullptr;
+    ggml_tensor *                 pi05_modulation_gpu       = nullptr;
     bool                         pi0_use_gpu_kv              = false;
     mutable bool                 pi0_cross_kv_inputs_ready   = false;
     mutable bool                 pi0_decode_attn_mask_ready  = false;

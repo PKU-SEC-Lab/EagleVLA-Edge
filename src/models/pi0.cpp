@@ -243,6 +243,8 @@ llm_build_pi0::llm_build_pi0(const llama_model & model, const llm_graph_params &
     const bool is_pi05 = model.time_mlp_in != nullptr &&
                          model.time_mlp_out != nullptr &&
                          model.ae_output_norm_dense != nullptr;
+    const char * shared_cast = std::getenv("PI05_FP16_SHARED_CAST");
+    const bool share_fp16 = is_pi05 && shared_cast && std::atoi(shared_cast) != 0;
     const char * pi05_debug_env = std::getenv("PI05_DEBUG_PREFIX");
     const bool keep_debug = is_pi05 && pi05_debug_env != nullptr && pi05_debug_env[0] != '\0' && std::strcmp(pi05_debug_env, "0") != 0;
 
@@ -306,10 +308,11 @@ llm_build_pi0::llm_build_pi0(const llama_model & model, const llm_graph_params &
             // all three projections use BF16 weights.
             ggml_tensor * qkv_in = cur;
             if (cur->type == GGML_TYPE_F32 &&
-                    model.layers[il].wq->type == GGML_TYPE_BF16 &&
-                    model.layers[il].wk->type == GGML_TYPE_BF16 &&
-                    model.layers[il].wv->type == GGML_TYPE_BF16) {
-                qkv_in = ggml_cast(ctx0, cur, GGML_TYPE_BF16);
+                    (model.layers[il].wq->type == GGML_TYPE_BF16 ||
+                     (share_fp16 && model.layers[il].wq->type == GGML_TYPE_F16)) &&
+                    model.layers[il].wk->type == model.layers[il].wq->type &&
+                    model.layers[il].wv->type == model.layers[il].wq->type) {
+                qkv_in = ggml_cast(ctx0, cur, model.layers[il].wq->type);
             }
             ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, qkv_in);
             ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, qkv_in);
@@ -379,9 +382,10 @@ llm_build_pi0::llm_build_pi0(const llama_model & model, const llm_graph_params &
                 // Convert it once instead of once per GEMM.
                 ggml_tensor * ffn_in = cur;
                 if (cur->type == GGML_TYPE_F32 &&
-                        model.layers[il].ffn_up->type == GGML_TYPE_BF16 &&
-                        model.layers[il].ffn_gate->type == GGML_TYPE_BF16) {
-                    ffn_in = ggml_cast(ctx0, cur, GGML_TYPE_BF16);
+                        (model.layers[il].ffn_up->type == GGML_TYPE_BF16 ||
+                         (share_fp16 && model.layers[il].ffn_up->type == GGML_TYPE_F16)) &&
+                        model.layers[il].ffn_gate->type == model.layers[il].ffn_up->type) {
+                    ffn_in = ggml_cast(ctx0, cur, model.layers[il].ffn_up->type);
                 }
                 cur = build_ffn(ffn_in,
                         model.layers[il].ffn_up,   NULL, NULL,

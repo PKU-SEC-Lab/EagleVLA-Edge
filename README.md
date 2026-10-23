@@ -223,6 +223,62 @@ PI05_CACHE_TIME_MODULATION=1 \
 
 The `-t 8 -tb 8` settings configure the host thread pools used by the persistent foreground server and are recommended for the tested RTX 4090 setup.
 
+#### Optional FP16 GEMM tuning: maximum-performance presets
+
+**To access the additional peak-performance configurations introduced by PR #6,
+you must explicitly enable its GEMM switches.** Rebuilding the merged code alone
+does not enable them: both default to off. The commands above retain the existing
+configuration; apply a device preset below **before** starting the server or
+loading a NumPy model, and reuse that process/model after warmup.
+
+| Switch | Effect | Trade-off |
+|---|---|---|
+| `GGML_CUDA_LT_AUTOTUNE=1` | Benchmarks cuBLASLt candidates for eligible FP16 2D GEMMs, caches the selected algorithm per shape, and retains the original cuBLAS path when no faster candidate is selected. | Adds first-use tuning overhead; different GEMM algorithms can change floating-point rounding and action outputs. |
+| `GGML_CUDA_F16_F32_OUT=1` | Keeps FP16 model weights/operands but uses FP32 accumulation and direct FP32 output in the affected cuBLAS path, removing the intermediate FP16 output conversion. | Changes accumulation/output precision; may improve or reduce performance depending on the GPU and shape. |
+
+**RTX 4090: fastest tested preset** — enable autotuning only. Enabling the
+FP32-output switch was slower in the tested PI0.5 configuration.
+
+```bash
+export GGML_CUDA_LT_AUTOTUNE=1
+export GGML_CUDA_F16_F32_OUT=0
+```
+
+**Jetson Orin: fastest tested preset** — enable both switches. This configuration
+passed the basic same-device OpenPI accuracy check and ABA consistency check.
+
+```bash
+export GGML_CUDA_LT_AUTOTUNE=1
+export GGML_CUDA_F16_F32_OUT=1
+```
+
+**Jetson Thor: highest measured throughput, accuracy caveat** — both switches
+were fastest, but PI0.5 did **not** meet the `cosine > 0.9994` gate against
+Thor-local OpenPI (minimum about 0.999075). The same optimized outputs passed the
+4090 OpenPI reference (minimum about 0.999676), and ABA restoration was exact.
+These are different references: do not call this a same-device accuracy pass.
+Use the two-switch preset only after validating it against the reference and
+accuracy requirements of your deployment; it is not a correctness-approved
+Thor default.
+
+For Python, set the same environment variables before importing/loading the
+native runtime; `ManagedForegroundSession` also passes them to its child server:
+
+```python
+import os
+os.environ["GGML_CUDA_LT_AUTOTUNE"] = "1"
+os.environ["GGML_CUDA_F16_F32_OUT"] = "1"  # Orin; use "0" on RTX 4090.
+# Thor: see the accuracy caveat above before enabling both switches.
+```
+
+To disable these two optimizations for comparison, set both switches to `0`
+and start a fresh process. They do not reduce diffusion steps or quantize the
+model, but optimized outputs are not guaranteed to be bit-identical. Recheck
+OpenPI accuracy and A→B→A consistency for your model, inputs and CUDA version.
+Measure warmed model and end-to-end latency separately: first-use tuning and
+CUDA Graph capture are not steady-state performance. Enabling both is **not**
+a universal maximum-performance setting for every GPU.
+
 ### 4. Run one inference round
 
 Reset the persistent session:
@@ -404,6 +460,11 @@ No fixed noise file is required for normal use. For a PI0 model, use
 `PI_MODEL=pi0`, disable the PI0.5 persistent trajectory flag and omit the
 two `PI05_*` flags as described in Quick Start.
 
+For maximum tested throughput, also apply the device-specific
+[FP16 GEMM tuning preset](#optional-fp16-gemm-tuning-maximum-performance-presets)
+before importing/loading `jetson_pi`. PR #6's two switches remain off unless
+explicitly set; note the RTX 4090 exception and Thor accuracy caveat.
+
 ### Alternative: persistent foreground server API
 
 Use this path when another process must communicate with a persistent
@@ -431,6 +492,11 @@ export PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
 #### Start and call the server from Python
+
+To enable the additional GEMM optimizations, apply the same
+[device-specific preset](#optional-fp16-gemm-tuning-maximum-performance-presets)
+before constructing the managed session. Its child server inherits those
+environment variables.
 
 ```python
 import os

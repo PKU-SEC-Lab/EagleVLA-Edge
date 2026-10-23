@@ -85,7 +85,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+#include <cublasLt.h>   // EAGLEVLA-EDGE OPT: autotuned GEMM path
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
@@ -1426,6 +1429,18 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
     bool prefer_f32_output = false;
     if (compute_type == GGML_TYPE_F16) {
         prefer_f32_output = cc == GGML_CUDA_CC_VOLTA || GGML_CUDA_CC_IS_RDNA4(cc) || GGML_CUDA_CC_IS_CDNA(cc);
+        // EAGLEVLA-EDGE OPT: on Ampere+ the F16 path writes a temporary F16 destination and
+        // then converts it to F32 (one extra kernel plus one extra round trip of the whole
+        // activation tensor). cuBLAS already accepts F16 A/B with CUBLAS_COMPUTE_32F and a
+        // CUDA_R_32F destination, which keeps the tensor cores but removes that conversion.
+        // Enabled by GGML_CUDA_F16_F32_OUT=1 so both paths can be compared with one binary.
+        if (!prefer_f32_output) {
+            static const bool force_f32_out = []() {
+                const char * env = std::getenv("GGML_CUDA_F16_F32_OUT");
+                return env != nullptr && env[0] != '\0' && std::atoi(env) != 0;
+            }();
+            prefer_f32_output = force_f32_out;
+        }
     } else if (compute_type == GGML_TYPE_BF16) {
         prefer_f32_output = !GGML_CUDA_CC_IS_RDNA3(cc) && !GGML_CUDA_CC_IS_CDNA(cc);
     }
@@ -1464,6 +1479,12 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
                                            (const float *) src1_ptr, s11,
                     (const float *) beta,  (float       *)  dst_ptr, ne0));
     } else if (ne12 == 1 && ne13 == 1) {
+        // EAGLEVLA-EDGE OPT: cublasLt autotuned path (see ggml_cuda_mul_mat_lt)
+        const bool lt_done = compute_type == GGML_TYPE_F16 &&
+            ggml_cuda_mul_mat_lt(ctx, src0_ptr, s01, src1_ptr, s11, dst_ptr, ne0,
+                                 ne01, ne11, ne10, cu_compute_type, cu_data_type_a, cu_data_type,
+                                 alpha, beta, main_stream);
+        if (!lt_done) {
         CUBLAS_CHECK(
             cublasGemmEx(ctx.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N,
                     ne01, ne11, ne10,
@@ -1472,6 +1493,7 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
                     beta,   dst_ptr, cu_data_type,   ne0,
                     cu_compute_type,
                     CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+        }
     } else if (r2 == 1 && r3 == 1 && is_src0_cont_2 && is_src1_cont_2) {
         // with a [0, 2, 1, 3] perm. and ne02==1 the matrix strides need to be determined from dim 3:
         const int64_t sma = ne02 == 1 ? s03 : s02;
@@ -1533,6 +1555,264 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
         const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(traits::ggml_type_val);
         to_fp32_cuda(dst_temp.get(), dst_ddf, ne_dst, main_stream);
     }
+}
+
+// ======================= EAGLEVLA-EDGE OPT: cublasLt autotuned GEMM =======================
+// Scope: only the plain 2D case (ne12 == 1 && ne13 == 1) with F16 operands, i.e. exactly the
+// branch that otherwise calls cublasGemmEx(CUBLAS_GEMM_DEFAULT_TENSOR_OP).
+//
+// Motivation, measured on Jetson AGX Orin with PI0.5 (see test0/PI05_LATENCY_REPORT.md):
+//   the cuBLAS heuristic behind cublasGemmEx picks a poor tile for the backbone down_proj
+//   (m=2048, n=565, k=16384) and runs it at ~9.9 TFLOPS, while the best cublasLt candidate
+//   available on the same device runs the identical GEMM at ~23.8 TFLOPS (1.58 ms vs 3.84 ms).
+//   The candidate list is not ordered by speed, so the winner is found by timing the
+//   candidates once per shape and caching it. Shapes that are already optimal (e.g. gate/up,
+//   m=16384 n=565 k=2048) simply keep their current kernel.
+//
+// Safety: the tuning repeats the same matmul into the same destination, so the computed
+// values are unchanged; it is skipped while a CUDA graph is being captured (the first call
+// for a given shape always happens before capture, so the cache is warm by then), and the
+// result of the tuning is discarded whenever the best cublasLt candidate is not faster than
+// the existing cublasGemmEx call.
+// =========================================================================================
+struct ggml_cuda_lt_key {
+    int64_t m, n, k;
+    int     compute, in_type, out_type;
+    bool operator==(const ggml_cuda_lt_key & o) const {
+        return m == o.m && n == o.n && k == o.k &&
+               compute == o.compute && in_type == o.in_type && out_type == o.out_type;
+    }
+};
+
+struct ggml_cuda_lt_key_hash {
+    size_t operator()(const ggml_cuda_lt_key & k) const {
+        size_t h = (size_t) k.m * 1000003u;
+        h = h * 1315423911u + (size_t) k.n * 1009u;
+        h = h * 1315423911u + (size_t) k.k * 101u;
+        h = h * 1315423911u + (size_t) k.compute * 31u + (size_t) k.in_type * 7u + (size_t) k.out_type;
+        return h;
+    }
+};
+
+struct ggml_cuda_lt_entry {
+    cublasLtMatmulAlgo_t algo  = {};
+    size_t               ws    = 0;
+    bool                 valid = false;
+    bool                 use   = false;   // false: keep using cublasGemmEx for this shape
+};
+
+static std::mutex ggml_cuda_lt_mutex;
+static std::unordered_map<ggml_cuda_lt_key, ggml_cuda_lt_entry, ggml_cuda_lt_key_hash> ggml_cuda_lt_cache;
+
+static bool ggml_cuda_lt_enabled() {
+    static const bool en = []() {
+        const char * e = std::getenv("GGML_CUDA_LT_AUTOTUNE");
+        return e != nullptr && e[0] != '\0' && std::atoi(e) != 0;
+    }();
+    return en;
+}
+
+static bool ggml_cuda_lt_verbose() {
+    static const bool vb = []() {
+        const char * e = std::getenv("GGML_CUDA_LT_VERBOSE");
+        return e != nullptr && e[0] != '\0' && std::atoi(e) != 0;
+    }();
+    return vb;
+}
+
+static cublasLtHandle_t ggml_cuda_lt_handle(int device) {
+    static std::mutex mtx;
+    static cublasLtHandle_t handles[GGML_CUDA_MAX_DEVICES] = {};
+    std::lock_guard<std::mutex> lock(mtx);
+    if (handles[device] == nullptr) {
+        CUBLAS_CHECK(cublasLtCreate(&handles[device]));
+    }
+    return handles[device];
+}
+
+// returns true when the matmul was executed through cublasLt
+static bool ggml_cuda_mul_mat_lt(
+        ggml_backend_cuda_context & ctx,
+        const void * a_ptr, int64_t lda,
+        const void * b_ptr, int64_t ldb,
+        void       * c_ptr, int64_t ldc,
+        int64_t m, int64_t n, int64_t k,
+        cublasComputeType_t compute_type_lt, cudaDataType_t in_type, cudaDataType_t out_type,
+        const void * alpha, const void * beta,
+        cudaStream_t stream) {
+    if (!ggml_cuda_lt_enabled()) {
+        return false;
+    }
+    // sanity: cublasLt requires consistent layouts
+    if (m <= 0 || n <= 0 || k <= 0 || lda < k || ldb < k || ldc < m) {
+        return false;
+    }
+
+    const ggml_cuda_lt_key key = { m, n, k, (int) compute_type_lt, (int) in_type, (int) out_type };
+
+    ggml_cuda_lt_entry entry;
+    {
+        std::lock_guard<std::mutex> lock(ggml_cuda_lt_mutex);
+        const auto it = ggml_cuda_lt_cache.find(key);
+        if (it != ggml_cuda_lt_cache.end()) {
+            entry = it->second;
+        }
+    }
+    if (!entry.valid) {
+        // Do not launch the tuning kernels while a CUDA graph is being captured.
+        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+        if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess || cap != cudaStreamCaptureStatusNone) {
+            return false;
+        }
+
+        cublasLtMatmulDesc_t          op   = nullptr;
+        cublasLtMatrixLayout_t        lA   = nullptr;
+        cublasLtMatrixLayout_t        lB   = nullptr;
+        cublasLtMatrixLayout_t        lC   = nullptr;
+        cublasLtMatmulPreference_t    pref = nullptr;
+        cublasLtMatmulHeuristicResult_t hs[16];
+        int got = 0;
+
+        CUBLAS_CHECK(cublasLtMatmulDescCreate(&op, compute_type_lt, out_type));
+        const cublasOperation_t oT = CUBLAS_OP_T;
+        const cublasOperation_t oN = CUBLAS_OP_N;
+        CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_TRANSA, &oT, sizeof(oT)));
+        CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_TRANSB, &oN, sizeof(oN)));
+        CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&lA, in_type,  k, m, lda));
+        CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&lB, in_type,  k, n, ldb));
+        CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&lC, out_type, m, n, ldc));
+
+        // The candidates returned by the heuristic are not ordered by speed; the winner is
+        // found by timing. A workspace is offered (some fast candidates need one) but the
+        // algorithm report is only accepted if it does not need more than that.
+        const size_t max_ws = 16ull << 20;
+        CUBLAS_CHECK(cublasLtMatmulPreferenceCreate(&pref));
+        CUBLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws, sizeof(max_ws)));
+        const cublasStatus_t hst = cublasLtMatmulAlgoGetHeuristic(
+            ggml_cuda_lt_handle(ctx.device), op, lA, lB, lC, lC, pref, 16, hs, &got);
+
+        if (hst != CUBLAS_STATUS_SUCCESS || got <= 0) {
+            cublasLtMatmulPreferenceDestroy(pref);
+            cublasLtMatrixLayoutDestroy(lA); cublasLtMatrixLayoutDestroy(lB); cublasLtMatrixLayoutDestroy(lC);
+            cublasLtMatmulDescDestroy(op);
+            std::lock_guard<std::mutex> lock(ggml_cuda_lt_mutex);
+            ggml_cuda_lt_cache[key] = entry;   // valid = false, use = false
+            return false;
+        }
+
+        // Reference: what the plain cublasGemmEx call costs. Candidates are only accepted
+        // if they beat it.
+        cudaEvent_t ev0, ev1;
+        CUDA_CHECK(cudaEventCreate(&ev0));
+        CUDA_CHECK(cudaEventCreate(&ev1));
+
+        double ref_ms = 0.0;
+        {
+            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaEventRecord(ev0, stream));
+            for (int i = 0; i < 3; ++i) {
+                CUBLAS_CHECK(cublasGemmEx(ctx.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N, (int) m, (int) n, (int) k,
+                        alpha, a_ptr, in_type, (int) lda, b_ptr, in_type, (int) ldb,
+                        beta,  c_ptr, out_type, (int) ldc, compute_type_lt, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+            }
+            CUDA_CHECK(cudaEventRecord(ev1, stream));
+            CUDA_CHECK(cudaEventSynchronize(ev1));
+            float ms = 0.0f; CUDA_CHECK(cudaEventElapsedTime(&ms, ev0, ev1));
+            ref_ms = ms / 3.0;
+        }
+
+        // The candidates are not ordered by speed and some of them cannot be run with the
+        // workspace / layouts at hand; every failure is treated as "skip this candidate".
+        int    best    = -1;
+        double best_ms = ref_ms;
+        ggml_cuda_pool_alloc<uint8_t> ws_alloc(ctx.pool());
+        ws_alloc.alloc(max_ws);
+        for (int i = 0; i < got; ++i) {
+            if (hs[i].state != CUBLAS_STATUS_SUCCESS || hs[i].workspaceSize > max_ws) {
+                continue;
+            }
+            void * ws_i = hs[i].workspaceSize > 0 ? ws_alloc.get() : nullptr;
+
+            bool ok = true;
+            for (int r = 0; r < 2 && ok; ++r) {   // warmup
+                if (cublasLtMatmul(ggml_cuda_lt_handle(ctx.device), op, alpha, a_ptr, lA, b_ptr, lB,
+                                   beta, c_ptr, lC, c_ptr, lC, &hs[i].algo, ws_i, hs[i].workspaceSize, stream) != CUBLAS_STATUS_SUCCESS) {
+                    ok = false;
+                }
+            }
+            if (!ok) { cudaGetLastError(); continue; }
+
+            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaEventRecord(ev0, stream));
+            for (int r = 0; r < 3 && ok; ++r) {
+                if (cublasLtMatmul(ggml_cuda_lt_handle(ctx.device), op, alpha, a_ptr, lA, b_ptr, lB,
+                                   beta, c_ptr, lC, c_ptr, lC, &hs[i].algo, ws_i, hs[i].workspaceSize, stream) != CUBLAS_STATUS_SUCCESS) {
+                    ok = false;
+                }
+            }
+            if (!ok) { cudaGetLastError(); continue; }
+
+            CUDA_CHECK(cudaEventRecord(ev1, stream));
+            CUDA_CHECK(cudaEventSynchronize(ev1));
+            float ms = 0.0f; CUDA_CHECK(cudaEventElapsedTime(&ms, ev0, ev1));
+            const double cand_ms = ms / 3.0;
+            if (cand_ms < best_ms) { best_ms = cand_ms; best = i; }
+        }
+
+        CUDA_CHECK(cudaEventDestroy(ev0));
+        CUDA_CHECK(cudaEventDestroy(ev1));
+        cublasLtMatmulPreferenceDestroy(pref);
+        cublasLtMatrixLayoutDestroy(lA); cublasLtMatrixLayoutDestroy(lB); cublasLtMatrixLayoutDestroy(lC);
+
+        if (best >= 0) {
+            entry.algo  = hs[best].algo;
+            entry.ws    = hs[best].workspaceSize;
+            entry.valid = true;
+            entry.use   = true;
+        } else {
+            entry.valid = true;
+            entry.use   = false;
+        }
+        if (ggml_cuda_lt_verbose() || entry.use) {
+            fprintf(stderr, "[EAGLEVLA-EDGE] cublasLt autotune m=%lld n=%lld k=%lld: "
+                            "cublasGemmEx=%.3f ms, best_lt=%.3f ms -> %s\n",
+                    (long long) m, (long long) n, (long long) k, ref_ms,
+                    entry.use ? best_ms : ref_ms,
+                    entry.use ? "USING cublasLt" : "keep cublasGemmEx");
+        }
+        {
+            std::lock_guard<std::mutex> lock(ggml_cuda_lt_mutex);
+            ggml_cuda_lt_cache[key] = entry;
+        }
+    }
+
+    if (!entry.use) {
+        return false;
+    }
+
+    cublasLtMatmulDesc_t   op = nullptr;
+    cublasLtMatrixLayout_t lA = nullptr;
+    cublasLtMatrixLayout_t lB = nullptr;
+    cublasLtMatrixLayout_t lC = nullptr;
+    CUBLAS_CHECK(cublasLtMatmulDescCreate(&op, compute_type_lt, out_type));
+    const cublasOperation_t oT = CUBLAS_OP_T;
+    const cublasOperation_t oN = CUBLAS_OP_N;
+    CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_TRANSA, &oT, sizeof(oT)));
+    CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_TRANSB, &oN, sizeof(oN)));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&lA, in_type,  k, m, lda));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&lB, in_type,  k, n, ldb));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&lC, out_type, m, n, ldc));
+
+    ggml_cuda_pool_alloc<uint8_t> ws_alloc(ctx.pool());
+    void * ws_ptr = nullptr;
+    if (entry.ws > 0) { ws_alloc.alloc(entry.ws); ws_ptr = ws_alloc.get(); }
+
+    CUBLAS_CHECK(cublasLtMatmul(ggml_cuda_lt_handle(ctx.device), op, alpha, a_ptr, lA, b_ptr, lB,
+                                beta, c_ptr, lC, c_ptr, lC, &entry.algo, ws_ptr, entry.ws, stream));
+
+    cublasLtMatrixLayoutDestroy(lA); cublasLtMatrixLayoutDestroy(lB); cublasLtMatrixLayoutDestroy(lC);
+    cublasLtMatmulDescDestroy(op);
+    return true;
 }
 
 static void ggml_cuda_mul_mat_cublas(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {

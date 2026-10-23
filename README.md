@@ -645,12 +645,12 @@ See the [FlashRT repository](https://github.com/flashrt-project/FlashRT) for ins
 
 ### PI0.5 on NVIDIA RTX 4090 (P50, ms)
 
-| Runtime configuration | LT_AUTOTUNE | F16_F32_OUT | ViT | LLM | Action Expert | Total | NumPy end-to-end |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Current optimizations, PR #6 switches off | 0 | 0 | 10.33 | 22.09 | 20.17 | 52.63 | 53.88 |
-| + cuBLASLt autotuning (fastest tested) | 1 | 0 | **10.07** | **21.26** | **20.14** | **51.49** | **52.74** |
-| + FP32 accumulation/output only | 0 | 1 | 11.23 | 25.15 | 20.25 | 56.65 | 57.95 |
-| + Both PR #6 switches | 1 | 1 | 11.50 | 24.56 | 20.24 | 56.37 | 57.63 |
+| Runtime configuration | ViT | LLM | Action Expert | Total |
+|---|---:|---:|---:|---:|
+| Naive PI0.5 | 32.3 | 34.5 | 96.2 | 162.9 |
+| + Graph reuse | 10.8 | 31.3 | 78.6 | 121.2 |
+| + Intermediate buffer, GPU KV, and unroll | 10.5 | 22.5 | 25.7 | 58.5 |
+| + time cache, and GEMM tuning (PR #6) | **10.3** | **21.2** | **20.1** | **51.7** |
 
 ### PI0.5 on NVIDIA Jetson Orin (P50, ms)
 
@@ -659,7 +659,7 @@ See the [FlashRT repository](https://github.com/flashrt-project/FlashRT) for ins
 | Naive PI0.5 | 152.3 | 631.0 | 536.8 | 1420.8 |
 | + Graph reuse | 71.9 | 196.9 | 143.9 | 412.9 |
 | + Intermediate buffer, GPU KV, and unroll | 71.9 | 194.8 | 107.8 | 374.5 |
-| Latest FP16: persistent graph, time cache, and GEMM tuning (PR #6) | **66.6** | **137.0** | **67.6** | **271.1** |
+| + time cache, and GEMM tuning (PR #6) | **66.6** | **137.0** | **67.6** | **271.1** |
 
 ### PI0.5 on NVIDIA Jetson Thor (P50, ms)
 
@@ -668,7 +668,7 @@ See the [FlashRT repository](https://github.com/flashrt-project/FlashRT) for ins
 | Naive PI0.5 | 61.7 | 187.0 | 209.2 | 457.9 |
 | + Graph reuse | 32.0 | 92.3 | 115.7 | 240.0 |
 | + Intermediate buffer, GPU KV, and unroll | 32.0 | 91.3 | 79.5 | 202.8 |
-| Latest FP16: persistent graph, time cache, and GEMM tuning (PR #6) | **29.0** | **54.9** | **48.9** | **132.8** |
+| + time cache, and GEMM tuning (PR #6) | **29.0** | **54.9** | **48.9** | **132.8** |
 
 
 ## Documentation

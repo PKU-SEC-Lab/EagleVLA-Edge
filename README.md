@@ -23,7 +23,7 @@
     <a href="#real-world-demo">Demo</a> ·
     <a href="#quick-start">Quick Start</a> ·
     <a href="#gr00t-n17-c-api-and-server">GR00T APIs</a> ·
-    <a href="#performance-on-jetson-orin">Performance</a> ·
+    <a href="#performance-on-rtx-4090-jetson-orin-and-thor">Performance</a> ·
     <a href="docs/model_conversion.md">Model Conversion</a> ·
     <a href="docs/foreground_server_usage.md">Server API</a> ·
     <a href="#citation">Citation</a>
@@ -158,6 +158,12 @@ and projector, with persistent graphs, GPU prefix KV reuse, unroll, shared
 FP16 activation casts, and cached time modulation enabled. Keep the same
 server alive across control ticks.
 
+**Jetson Orin (single GPU, fastest tested preset):** the command explicitly
+enables both GEMM switches **before server startup**. For RTX 4090, use the
+next command with FP32 output disabled. For Thor, read the
+[accuracy caveat](#optional-fp16-gemm-tuning-maximum-performance-presets) before
+using the two-switch preset; it is not a same-device accuracy-approved default.
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 PI_MODEL=pi05 \
@@ -165,6 +171,8 @@ PI0_PERSISTENT_CUDA_GRAPH=1 \
 PI0_DECODE_UNROLL=10 \
 PI05_FP16_SHARED_CAST=1 \
 PI05_CACHE_TIME_MODULATION=1 \
+GGML_CUDA_LT_AUTOTUNE=1 \
+GGML_CUDA_F16_F32_OUT=1 \
 ./build/bin/llama-server \
   -m /path/to/pi05-base-F16-10-action.gguf \
   --mmproj /path/to/mmproj-model-f16.gguf \
@@ -208,6 +216,8 @@ PI0_PERSISTENT_CUDA_GRAPH=1 \
 PI0_DECODE_UNROLL=10 \
 PI05_FP16_SHARED_CAST=1 \
 PI05_CACHE_TIME_MODULATION=1 \
+GGML_CUDA_LT_AUTOTUNE=1 \
+GGML_CUDA_F16_F32_OUT=0 \
 ./build/bin/llama-server \
   -m /path/to/pi05-base-F16-10-action.gguf \
   --mmproj /path/to/mmproj-model-f16.gguf \
@@ -227,9 +237,10 @@ The `-t 8 -tb 8` settings configure the host thread pools used by the persistent
 
 **To access the additional peak-performance configurations introduced by PR #6,
 you must explicitly enable its GEMM switches.** Rebuilding the merged code alone
-does not enable them: both default to off. The commands above retain the existing
-configuration; apply a device preset below **before** starting the server or
-loading a NumPy model, and reuse that process/model after warmup.
+does not enable them: both default to off in the runtime. The commands above
+explicitly select the tested Orin or RTX 4090 preset. Set the variables
+**before** starting the server or loading a NumPy model, and restart the
+process after changing them; reuse that process/model after warmup.
 
 | Switch | Effect | Trade-off |
 |---|---|---|
@@ -426,6 +437,9 @@ os.environ["PI0_PERSISTENT_CUDA_GRAPH"] = "1"
 os.environ["PI0_DECODE_UNROLL"] = "10"
 os.environ["PI05_FP16_SHARED_CAST"] = "1"
 os.environ["PI05_CACHE_TIME_MODULATION"] = "1"
+os.environ["GGML_CUDA_LT_AUTOTUNE"] = "1"
+os.environ["GGML_CUDA_F16_F32_OUT"] = "1"  # Orin; set "0" on RTX 4090.
+# Thor: validate the accuracy caveat before using the two-switch preset.
 
 import numpy as np
 import jetson_pi
@@ -453,17 +467,19 @@ model.close()
 [in-process NumPy API reference](docs/python_api.md) for array requirements,
 lifetime rules, and context-manager usage.
 
-This is the same optimized CUDA configuration used on RTX 4090, Orin and
-Thor. Keep one `model` instance alive; each `predict()` refreshes the request
+The example selects the tested Orin preset; set `GGML_CUDA_F16_F32_OUT="0"`
+for RTX 4090, and see the Thor accuracy caveat before using both switches.
+Keep one `model` instance alive; each `predict()` refreshes the request
 inputs while retaining compatible graphs and immutable time modulation.
 No fixed noise file is required for normal use. For a PI0 model, use
 `PI_MODEL=pi0`, disable the PI0.5 persistent trajectory flag and omit the
 two `PI05_*` flags as described in Quick Start.
 
-For maximum tested throughput, also apply the device-specific
+For maximum tested throughput, select the device-specific
 [FP16 GEMM tuning preset](#optional-fp16-gemm-tuning-maximum-performance-presets)
-before importing/loading `jetson_pi`. PR #6's two switches remain off unless
-explicitly set; note the RTX 4090 exception and Thor accuracy caveat.
+in the environment assignments above before importing/loading `jetson_pi`.
+The switches are read by the native runtime, so restart Python after changing
+them rather than modifying them on an already loaded model.
 
 ### Alternative: persistent foreground server API
 
@@ -493,10 +509,11 @@ export PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
 
 #### Start and call the server from Python
 
-To enable the additional GEMM optimizations, apply the same
+The example below explicitly enables the same Orin GEMM preset. Select the
 [device-specific preset](#optional-fp16-gemm-tuning-maximum-performance-presets)
-before constructing the managed session. Its child server inherits those
-environment variables.
+before constructing the managed session (`GGML_CUDA_F16_F32_OUT="0"` for
+RTX 4090; see the Thor caveat). Its child server inherits those environment
+variables; changing them after server startup requires a server restart.
 
 ```python
 import os
@@ -507,6 +524,9 @@ os.environ["PI0_PERSISTENT_CUDA_GRAPH"] = "1"
 os.environ["PI0_DECODE_UNROLL"] = "10"
 os.environ["PI05_FP16_SHARED_CAST"] = "1"
 os.environ["PI05_CACHE_TIME_MODULATION"] = "1"
+os.environ["GGML_CUDA_LT_AUTOTUNE"] = "1"
+os.environ["GGML_CUDA_F16_F32_OUT"] = "1"  # Orin; set "0" on RTX 4090.
+# Thor: validate the accuracy caveat before using the two-switch preset.
 os.environ["LLAMA_ARG_THREADS"] = "8"
 os.environ["LLAMA_ARG_CTX_SIZE"] = "131072"
 
@@ -621,9 +641,42 @@ See the [FlashRT repository](https://github.com/flashrt-project/FlashRT) for ins
 
 
 
-## Performance on Jetson Orin and Thor
+## Performance on RTX 4090, Jetson Orin and Thor
 
-Latency is measured in milliseconds. The following values are P50 model-side latency for PI0.5 with two 224×224 views, 10 diffusion steps, and 10 actions; `Total` is the sum of ViT, LLM, and Action Expert. See the paper for the complete experimental setup and end-to-end control results.
+Latency is measured in milliseconds. The following values are P50 model-side latency for PI0.5 with two 224×224 views, 10 diffusion steps, and 10 actions; `Total` is the P50 of per-call ViT + LLM + Action Expert time, so rounded component medians need not add up exactly. See the paper for the complete experimental setup and end-to-end control results.
+
+The PR #6 measurements below were collected on 2026-10-23 using the same new
+FP16 model/projector, the in-process NumPy API, a single GPU, eight host threads,
+ten warmups and fifty timed calls. Thor and Orin were in MAXN. Persistent CUDA
+Graph, GPU KV, unroll=10, shared FP16 casts and time modulation caching remain
+enabled in every PR #6 configuration. First-use autotuning, model loading and
+graph capture are excluded from steady-state timing. NumPy end-to-end starts
+with ready RGB/state and ends on action return; it excludes JPEG reads.
+
+### PI0.5 on NVIDIA RTX 4090
+
+Complete four-configuration PR #6 switch comparison; `0` means disabled and
+`1` enabled. The baseline already includes the earlier graph/buffer/time-cache
+optimizations, so it is not naive PyTorch or an unoptimized CLI baseline.
+
+| Runtime configuration | LT_AUTOTUNE | F16_F32_OUT | ViT | LLM | Action Expert | Total | NumPy end-to-end |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Current optimizations, PR #6 switches off | 0 | 0 | 10.33 | 22.09 | 20.17 | 52.63 | 53.88 |
+| + cuBLASLt autotuning (fastest tested) | 1 | 0 | **10.07** | **21.26** | **20.14** | **51.49** | **52.74** |
+| + FP32 accumulation/output only | 0 | 1 | 11.23 | 25.15 | 20.25 | 56.65 | 57.95 |
+| + Both PR #6 switches | 1 | 1 | 11.50 | 24.56 | 20.24 | 56.37 | 57.63 |
+
+All four configurations passed the basic same-device OpenPI check
+(`cosine > 0.9994`) and restored A exactly in ABA. For the fastest preset,
+A1/B/A2 cosine values were 0.999520521 / 0.999920983 / 0.999520521. Its model
+and NumPy end-to-end P90 were 52.35 / 53.69 ms. Only autotuning improved
+steady-state performance on this RTX 4090 setup; enabling FP32 output was
+slower. These are single fifty-sample batches, not universal latency guarantees.
+
+For the following Orin and Thor tables, the latest row enables both
+`GGML_CUDA_LT_AUTOTUNE=1` and `GGML_CUDA_F16_F32_OUT=1`. Earlier rows are
+retained historical measurements, not a new same-checkpoint controlled ablation
+against the latest row.
 
 ### PI0.5 on NVIDIA Jetson Orin
 
@@ -631,7 +684,12 @@ Latency is measured in milliseconds. The following values are P50 model-side lat
 |---|---:|---:|---:|---:|
 | Naive PI0.5 | 152.3 | 631.0 | 536.8 | 1420.8 |
 | + Graph reuse | 71.9 | 196.9 | 143.9 | 412.9 |
-| + Intermediate buffer, GPU KV, and unroll | **71.9** | **194.8** | **107.8** | **374.5** |
+| + Intermediate buffer, GPU KV, and unroll | 71.9 | 194.8 | 107.8 | 374.5 |
+| Latest FP16: persistent graph, time cache, and GEMM tuning (PR #6) | **66.6** | **137.0** | **67.6** | **271.1** |
+
+The latest Orin configuration passed the basic same-device OpenPI check
+(`cosine > 0.9994`) and ABA consistency check. Its NumPy end-to-end P50 was
+273.36 ms; that API wall-clock time is not the model-side `Total` above.
 
 ### PI0.5 on NVIDIA Jetson Thor
 
@@ -639,7 +697,15 @@ Latency is measured in milliseconds. The following values are P50 model-side lat
 |---|---:|---:|---:|---:|
 | Naive PI0.5 | 61.7 | 187.0 | 209.2 | 457.9 |
 | + Graph reuse | 32.0 | 92.3 | 115.7 | 240.0 |
-| + Intermediate buffer, GPU KV, and unroll | **32.0** | **91.3** | **79.5** | **202.8** |
+| + Intermediate buffer, GPU KV, and unroll | 32.0 | 91.3 | 79.5 | 202.8 |
+| Latest FP16: persistent graph, time cache, and GEMM tuning (PR #6)† | **29.0** | **54.9** | **48.9** | **132.8** |
+
+† Highest measured throughput, not a same-device accuracy pass: the latest
+Thor configuration restored A exactly in ABA but had minimum cosine about
+0.999075 against Thor-local OpenPI (below 0.9994). Against the previously used
+4090 OpenPI reference, minimum cosine was about 0.999676. See the
+[Thor accuracy caveat](#optional-fp16-gemm-tuning-maximum-performance-presets).
+Its NumPy end-to-end P50 was 134.06 ms, separate from model-side `Total`.
 
 
 ## Documentation
